@@ -1,0 +1,5 @@
+mcp<2   # v2 renamed FastMCP; tutorials use v1
+streamlit
+pytest
+google-api-python-client
+google-auth-oauthlib
