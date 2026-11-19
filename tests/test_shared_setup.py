@@ -8,7 +8,8 @@ from core.undo_router import route_undo
 from fake_data import fake_google as g
 from fake_data.sample_data import SCENARIOS
 from fake_data.seed import seed
-from google_tools.calendar_tools import calendar_cancel, calendar_get, calendar_update
+from google_tools.calendar_tools import (calendar_cancel, calendar_create, calendar_get,
+                                         calendar_list, calendar_update)
 from google_tools.email_tools import email_send
 from google_tools.undo_fixes import restore_calendar, undo_email
 from repair.group_repair import group_repair
@@ -28,8 +29,11 @@ def test_google_tools_return_before_and_after():
     assert calendar_get("evt_demo") is None or isinstance(calendar_get("evt_demo"), dict)
     for result in (calendar_cancel("evt_demo"),
                    calendar_update("evt_demo", {"start": "2026-11-20T16:00"}),
+                   calendar_create({"summary": "Makeup review", "start": "2026-11-20T15:00",
+                                    "end": "2026-11-20T16:00", "attendees": []}),
                    email_send(["aryan@test.com"], "Hi", "Test")):
         assert set(result) == {"before", "after"}
+    assert isinstance(calendar_list("2026-11-19T00:00", "2026-11-20T00:00"), list)
 
 
 def test_every_fixer_returns_an_undo_result(tmp_path):
