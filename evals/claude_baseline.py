@@ -215,6 +215,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--prompt", default="naive", choices=["naive", "guided"])
     ap.add_argument("--no-fallbacks", action="store_true",
                     help="don't let the API re-run a declined request on another model")
+    ap.add_argument("--out", help="save the full JSON result here instead of printing it")
     args = ap.parse_args(argv)
     sc = next((s for s in load_scenarios() if s["id"] == args.scenario), None)
     if sc is None:
@@ -222,8 +223,31 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
     res = run_baseline(sc, mock=args.mock, model=args.model, effort=args.effort,
                        variant=args.prompt, fallbacks=not args.no_fallbacks)
-    print(json.dumps(res, indent=2, default=str))
+    if args.out:
+        Path(args.out).write_text(json.dumps(res, indent=2, default=str))
+    else:
+        print(json.dumps(res, indent=2, default=str))
+    print_summary(res)
     return 0
+
+
+def print_summary(res: dict) -> None:
+    print(f"\n=== {res['scenario']} · {res['mode']} ===")
+    if "stop_reason" in res:
+        print(f"served by {', '.join(res['served_by']) or '-'} · stop_reason "
+              f"{res['stop_reason']} · {res.get('api_calls', 0)} API calls")
+    print(f"tool calls: {' -> '.join(c['tool'] for c in res['tool_calls']) or 'none'}")
+    for d, v in res["dimensions"].items():
+        mark = "  n/a" if v["pass"] is None else (" pass" if v["pass"] else " FAIL")
+        print(f"  {mark}  {d:26} {v['why']}")
+    print(f"  overall: {'PASSED' if res['passed'] else 'FAILED'}")
+    if "usage" in res:
+        u = res["usage"]
+        cost = res["est_cost_usd"]
+        print("tokens: " + ", ".join(f"{k} {v:,}" for k, v in u.items()))
+        print("est. cost: " + ("unknown (no price for this model)" if cost is None else
+              f"${cost:.4f}" + ("" if res["cost_exact"] else " (approx: a fallback model "
+                                                           "served some turns)")))
 
 
 if __name__ == "__main__":
