@@ -4,6 +4,7 @@ CALLED BY: Varuni's undo router
 PLACEHOLDERS: return the agreed UndoResult shape, but don't undo anything yet.
 TODO(Visista): build exact restore + email undo for real.
 """
+from google_tools.backend import get_backend
 from shared.models import ActionRecord, UndoResult
 
 

@@ -6,6 +6,8 @@ PLACEHOLDERS: right names, inputs and output shapes, but they don't change anyth
 TODO(Visista): build these for real (Google Calendar API).
 """
 
+from google_tools.backend import get_backend
+
 
 def calendar_get(event_id: str) -> dict | None:
     """Return the event as it is right now, or None if it doesn't exist."""
