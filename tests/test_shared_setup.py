@@ -6,7 +6,7 @@ someone changed a shared name or format: tell the group.
 """
 from core.undo_router import route_undo
 from fake_data import fake_google as g
-from fake_data.sample_data import SCENARIOS
+from fake_data.sample_data import FRIDAY_EVENTS, SCENARIOS
 from fake_data.seed import seed
 from google_tools.calendar_tools import (calendar_cancel, calendar_create, calendar_get,
                                          calendar_list, calendar_update)
@@ -25,7 +25,10 @@ def test_seed_loads_every_story(tmp_path, monkeypatch):
     assert len(db.list_flags(conn)) == sum(1 for s in SCENARIOS if s["flag"])
 
 
-def test_google_tools_return_before_and_after():
+def test_google_tools_return_before_and_after(tmp_path, monkeypatch):
+    # Use a temporary fake calendar, so this test never changes anyone's real fake_google_state.json
+    monkeypatch.setattr(g, "STATE_PATH", tmp_path / "fake_google.json")
+    g.reset(FRIDAY_EVENTS)
     assert calendar_get("evt_demo") is None or isinstance(calendar_get("evt_demo"), dict)
     for result in (calendar_cancel("evt_demo"),
                    calendar_update("evt_demo", {"start": "2026-11-20T16:00"}),

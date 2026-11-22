@@ -129,3 +129,120 @@ def test_list_gives_a_clear_error_for_bad_times(friday):
 def test_list_end_must_be_after_start(friday):
     with pytest.raises(ValueError, match="must be after start"):
         ct.calendar_list("2026-11-21T00:00", "2026-11-20T00:00")
+
+
+# ---------- step 4: changing the calendar ----------
+def test_cancel_returns_the_before_copy_and_removes_the_event(friday):
+    result = ct.calendar_cancel("evt_demo")
+    assert set(result) == {"before", "after"}
+    assert result["before"]["summary"] == "CS 598 demo prep"
+    assert AGREED_FIELDS <= set(result["before"])
+    assert result["after"] is None
+    assert ct.calendar_get("evt_demo") is None
+    assert "evt_demo" not in [e["id"] for e in ct.calendar_list(*FRIDAY)]
+
+
+def test_cancelled_event_can_come_back_with_the_same_id(friday):
+    before = ct.calendar_cancel("evt_demo")["before"]
+    fake_google.restore_event("evt_demo")          # what step 5 will do
+    assert ct.calendar_get("evt_demo") == before
+
+
+def test_cancel_missing_or_already_cancelled_event_does_nothing(friday):
+    assert ct.calendar_cancel("evt_nope") == {"before": None, "after": None}
+    ct.calendar_cancel("evt_demo")
+    assert ct.calendar_cancel("evt_demo") == {"before": None, "after": None}
+
+
+def test_update_returns_before_and_after(friday):
+    result = ct.calendar_update("evt_demo", {"start": "2026-11-20T16:00", "end": "2026-11-20T17:00"})
+    assert (result["before"]["start"], result["before"]["end"]) == ("2026-11-20T15:00", "2026-11-20T16:00")
+    assert (result["after"]["start"], result["after"]["end"]) == ("2026-11-20T16:00", "2026-11-20T17:00")
+    assert result["after"]["id"] == "evt_demo"
+    assert ct.calendar_get("evt_demo")["start"] == "2026-11-20T16:00"
+
+
+def test_update_with_only_a_new_start_keeps_the_length(friday):
+    after = ct.calendar_update("evt_demo", {"start": "2026-11-20T17:30"})["after"]
+    assert (after["start"], after["end"]) == ("2026-11-20T17:30", "2026-11-20T18:30")
+
+
+def test_update_keeps_the_timezone_style_of_the_new_start(friday):
+    after = ct.calendar_update("evt_demo", {"start": "2026-11-20T17:00:00-05:00"})["after"]
+    assert after["end"] == "2026-11-20T18:00:00-05:00"
+
+
+def test_update_quietly_ignores_fields_google_decides(friday):
+    # Aryan's repairs copy whole events, so these can arrive in changes
+    after = ct.calendar_update("evt_demo", {"start": "2026-11-20T16:00", "end": "2026-11-20T17:00",
+                                            "id": "evt_other", "responses": {}, "organizer": "x@test.com",
+                                            "raw": {}, "status": "confirmed"})["after"]
+    assert after["id"] == "evt_demo" and after["organizer"] == ""
+
+
+def test_update_rejects_unknown_fields_with_a_clear_error(friday):
+    with pytest.raises(ValueError, match="can't set title. You can set: summary"):
+        ct.calendar_update("evt_demo", {"title": "New name"})
+
+
+def test_update_with_nothing_to_change_is_an_error(friday):
+    with pytest.raises(ValueError, match="nothing to change"):
+        ct.calendar_update("evt_demo", {"responses": {}})
+
+
+def test_update_end_before_start_is_refused_and_changes_nothing(friday):
+    with pytest.raises(ValueError, match="must be after start"):
+        ct.calendar_update("evt_demo", {"end": "2026-11-20T14:00"})
+    assert ct.calendar_get("evt_demo")["end"] == "2026-11-20T16:00"
+
+
+def test_update_missing_event_does_nothing(friday):
+    assert ct.calendar_update("evt_nope", {"summary": "x"}) == {"before": None, "after": None}
+
+
+def test_update_turns_google_style_attendees_into_emails(friday):
+    after = ct.calendar_update("evt_1on1", {"attendees": [{"email": OWNER}, "aryan@test.com"]})["after"]
+    assert after["attendees"] == [OWNER, "aryan@test.com"]
+
+
+def test_before_copy_is_safe_to_change(friday):
+    result = ct.calendar_update("evt_demo", {"summary": "Renamed"})
+    result["before"]["summary"] = "changed by mistake"
+    assert ct.calendar_get("evt_demo")["summary"] == "Renamed"
+
+
+def test_create_takes_the_flat_shape_and_gets_a_new_id(friday):
+    result = ct.calendar_create({"summary": "Makeup sync", "start": "2026-11-23T10:00",
+                                 "end": "2026-11-23T10:30", "attendees": [OWNER, "aryan@test.com"],
+                                 "description": "Notes", "location": "https://zoom.us/j/123"})
+    assert result["before"] is None
+    made = result["after"]
+    assert made["id"].startswith("evt_") and AGREED_FIELDS <= set(made)
+    assert (made["location"], made["description"]) == ("https://zoom.us/j/123", "Notes")
+    assert ct.calendar_get(made["id"]) == made
+
+
+def test_create_from_a_copy_of_another_event_leaves_the_original_alone(friday):
+    copy_of_demo = ct.calendar_get("evt_demo")       # has id, organizer, responses...
+    copy_of_demo.update(start="2026-11-23T15:00", end="2026-11-23T16:00")
+    made = ct.calendar_create(copy_of_demo)["after"]
+    assert made["id"] != "evt_demo"
+    assert ct.calendar_get("evt_demo")["start"] == "2026-11-20T15:00"
+
+
+def test_create_needs_start_and_end(friday):
+    with pytest.raises(ValueError, match="needs both a start and an end time"):
+        ct.calendar_create({"summary": "No end", "start": "2026-11-23T10:00"})
+
+
+def test_create_fills_in_a_title_and_attendees_if_missing(friday):
+    made = ct.calendar_create({"start": "2026-11-23T10:00", "end": "2026-11-23T10:30"})["after"]
+    assert (made["summary"], made["attendees"]) == ("(no title)", [])
+
+
+def test_finished_functions_never_say_placeholder():
+    # Aryan's adapter switches to these functions only when this word is gone
+    import inspect
+    for fn in (ct.calendar_get, ct.calendar_list, ct.calendar_cancel, ct.calendar_update,
+               ct.calendar_create):
+        assert "PLACEHOLDER" not in inspect.getsource(fn)
