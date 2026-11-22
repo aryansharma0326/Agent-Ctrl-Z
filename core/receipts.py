@@ -85,14 +85,23 @@ def _clock(t: datetime) -> str:
     return f"{t.hour % 12 or 12}:{t:%M} {'AM' if t.hour < 12 else 'PM'}"
 
 
+def _zone(t: datetime) -> str:
+    """'UTC-5', 'UTC+5.5' or 'UTC', so people in other timezones aren't misled."""
+    offset = t.utcoffset()
+    if offset is None:
+        return ""
+    hours = offset.total_seconds() / 3600
+    return " UTC" if hours == 0 else f" UTC{hours:+g}"
+
+
 def _when(event: dict) -> str:
-    """e.g. 'Fri Nov 20, 3:00 PM–4:00 PM' (empty if the times are missing)."""
+    """e.g. 'Fri Nov 20, 3:00 PM–4:00 PM UTC-5' (empty if the times are missing)."""
     try:
         start = datetime.fromisoformat(event["start"])
         end = datetime.fromisoformat(event["end"])
     except (KeyError, TypeError, ValueError):
         return ""
-    return f"{start:%a %b} {start.day}, {_clock(start)}–{_clock(end)}"
+    return f"{start:%a %b} {start.day}, {_clock(start)}–{_clock(end)}{_zone(start)}"
 
 
 def describe(action: ActionRecord) -> str:

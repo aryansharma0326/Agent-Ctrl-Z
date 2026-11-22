@@ -29,7 +29,7 @@ def test_receipt_says_what_happened_and_has_a_personal_link(action):
     receipts = rc.make_receipts(action, OWNER)
     assert [r["to"] for r in receipts] == ["aryan@test.com", "visista@test.com"]
     body = receipts[0]["body"]
-    assert "cancelled 'CS 598 demo prep' (Fri Nov 20, 3:00 PM–4:00 PM)" in body
+    assert "cancelled 'CS 598 demo prep' (Fri Nov 20, 3:00 PM–4:00 PM UTC-5)" in body
     assert '"Clear my Friday"' in body and receipts[0]["flag_link"] in body
     assert receipts[0]["flag_link"] != receipts[1]["flag_link"]
 
@@ -39,7 +39,7 @@ def test_describe_a_moved_event_and_an_email():
                          after={**DEMO, "start": "2026-11-27T15:00:00-05:00",
                                 "end": "2026-11-27T16:00:00-05:00"},
                          affected_people=[], instruction="x")
-    assert rc.describe(moved).endswith("now Fri Nov 27, 3:00 PM–4:00 PM")
+    assert rc.describe(moved).endswith("now Fri Nov 27, 3:00 PM–4:00 PM UTC-5")
     email = ActionRecord(tool="email.send", target_id="msg_1", before=None,
                          after={"id": "msg_1", "subject": "Meeting cancelled"},
                          affected_people=[], instruction="x")
@@ -141,3 +141,12 @@ def test_receipt_tells_each_person_if_they_were_removed_or_added():
     assert "You were removed from this event." in bodies["visista@test.com"]
     assert "You were added to this event." in bodies["ta@test.com"]
     assert "You were" not in bodies["aryan@test.com"]
+
+
+def test_times_show_their_timezone_so_other_countries_are_not_misled():
+    london = {**DEMO, "start": "2026-11-24T10:00:00+00:00", "end": "2026-11-24T10:30:00+00:00"}
+    india = {**DEMO, "start": "2026-11-24T10:00:00+05:30", "end": "2026-11-24T10:30:00+05:30"}
+    no_zone = {**DEMO, "start": "2026-11-24T10:00", "end": "2026-11-24T10:30"}
+    assert rc._when(london).endswith("10:30 AM UTC")
+    assert rc._when(india).endswith("UTC+5.5")
+    assert rc._when(no_zone).endswith("10:30 AM")
