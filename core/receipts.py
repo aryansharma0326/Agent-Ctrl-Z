@@ -15,8 +15,6 @@ and is never given to the agent or to any fixer.
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
 import os
 import re
 import unicodedata
@@ -24,6 +22,7 @@ from datetime import datetime
 from urllib.parse import urlencode
 
 from core.action_log import owner_email
+from core.signing import matches, sign
 from google_tools import email_tools
 from shared import db
 from shared.models import ActionRecord, Flag, UndoResult
@@ -43,11 +42,6 @@ SUSPICIOUS = re.compile(
 
 # ---------- settings ----------
 
-def _secret() -> bytes:
-    """Key used to sign flag links. Set FLAG_SECRET in real use."""
-    return os.environ.get("FLAG_SECRET", "dev-only-secret-change-me").encode()
-
-
 def app_url() -> str:
     """Where the receipt/flag page lives. Set APP_URL when deployed."""
     return os.environ.get("APP_URL", "http://localhost:8501").rstrip("/")
@@ -56,8 +50,7 @@ def app_url() -> str:
 # ---------- signed flag links ----------
 
 def flag_token(action_id: str, person: str) -> str:
-    message = f"{action_id}|{person.strip().lower()}".encode()
-    return hmac.new(_secret(), message, hashlib.sha256).hexdigest()[:32]
+    return sign(f"flag|{action_id}|{person.strip().lower()}")
 
 
 def flag_link(action_id: str, person: str) -> str:
@@ -67,7 +60,7 @@ def flag_link(action_id: str, person: str) -> str:
 
 
 def valid_token(action_id: str, person: str, token: str) -> bool:
-    return hmac.compare_digest(flag_token(action_id, person), token or "")
+    return matches(f"flag|{action_id}|{(person or '').strip().lower()}", token)
 
 
 # ---------- untrusted flag text ----------
