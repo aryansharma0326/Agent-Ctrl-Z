@@ -129,3 +129,15 @@ def test_page_shows_receipt_and_flags(page, conn, action):
 def test_page_refuses_a_bad_link(page):
     at = page(token="0" * 32)
     assert not at.exception and "isn't valid" in at.error[0].value
+
+
+def test_receipt_tells_each_person_if_they_were_removed_or_added():
+    after = {**DEMO, "attendees": [OWNER, "aryan@test.com", "ta@test.com"]}
+    rec = ActionRecord(tool="calendar.update_event", target_id="evt_demo", before=DEMO, after=after,
+                       affected_people=["aryan@test.com", "visista@test.com", "ta@test.com"],
+                       instruction="Add the TA to our demo prep")
+    assert rc.describe(rec).endswith("; added ta@test.com; removed visista@test.com")
+    bodies = {r["to"]: r["body"] for r in rc.make_receipts(rec, OWNER)}
+    assert "You were removed from this event." in bodies["visista@test.com"]
+    assert "You were added to this event." in bodies["ta@test.com"]
+    assert "You were" not in bodies["aryan@test.com"]

@@ -108,7 +108,39 @@ def describe(action: ActionRecord) -> str:
         new_when = _when(action.after)
         if new_when and new_when != when:
             text += f", now {new_when}"
+        added, removed = attendee_changes(action)
+        if added:
+            text += f"; added {', '.join(added)}"
+        if removed:
+            text += f"; removed {', '.join(removed)}"
     return text
+
+
+def _attendees(event: dict | None) -> list[str]:
+    out = []
+    for a in (event or {}).get("attendees") or []:
+        email = a.get("email", "") if isinstance(a, dict) else a
+        if email:
+            out.append(email.strip().lower())
+    return out
+
+
+def attendee_changes(action: ActionRecord) -> tuple[list[str], list[str]]:
+    """Who an update added to and removed from an event."""
+    if action.tool != "calendar.update_event" or not action.after or "attendees" not in action.after:
+        return [], []
+    before, after = _attendees(action.before), _attendees(action.after)
+    return ([p for p in after if p not in before], [p for p in before if p not in after])
+
+
+def _personal_note(action: ActionRecord, person: str) -> str:
+    """A line that says what this change means for this one person."""
+    added, removed = attendee_changes(action)
+    if person in removed:
+        return "You were removed from this event.\n"
+    if person in added:
+        return "You were added to this event.\n"
+    return ""
 
 
 def make_receipts(action: ActionRecord, owner: str | None = None) -> list[dict]:
@@ -121,6 +153,7 @@ def make_receipts(action: ActionRecord, owner: str | None = None) -> list[dict]:
             "to": person,
             "subject": f"{owner}'s AI assistant {describe(action)}",
             "body": (f"Hi,\n\n{owner}'s AI assistant {describe(action)}.\n"
+                     f"{_personal_note(action, person)}"
                      f"They asked it: \"{action.instruction}\"\n\n"
                      f"Does this look wrong for you? Flag it here and {owner} will be told:\n"
                      f"{link}\n\nIf it's fine, you don't need to do anything."),
