@@ -212,3 +212,20 @@ def test_refused_or_failing_calls_give_a_clear_message_and_log_nothing(server, m
     assert not mcp_server.create_event({"summary": "x"}, "x")["ok"]
     assert not mcp_server.send_email(["aryan@test.com"], "s", "b", "x")["ok"]
     assert db.list_actions(server) == []
+
+
+def test_held_email_says_it_can_still_be_undone(server, monkeypatch):
+    monkeypatch.setattr(mcp_server.email_tools, "email_send",
+                        lambda to, s, b: {"before": None, "after": {"id": "msg_h", "status": "held",
+                                                                     "to": to, "subject": s}})
+    out = mcp_server.send_email(["aryan@test.com"], "Meeting off", "x", "Tell Aryan")
+    assert out["ok"] and "held briefly" in out["message"] and "undone" in out["message"]
+
+
+def test_server_starts_the_held_email_sender_when_there_is_one(monkeypatch):
+    started = []
+    monkeypatch.setattr(mcp_server.email_tools, "start_background_sender",
+                        lambda: started.append(True), raising=False)
+    assert mcp_server.start_email_sender() and started == [True]
+    monkeypatch.delattr(mcp_server.email_tools, "start_background_sender")
+    assert mcp_server.start_email_sender() is False

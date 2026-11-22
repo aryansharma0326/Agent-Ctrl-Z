@@ -162,6 +162,9 @@ def send_email(to: list[str], subject: str, body: str, instruction: str) -> dict
     if not sent or not sent.get("id"):
         return _fail("The email could not be sent.")
     rec = log_action(get_conn(), "email.send", sent["id"], result, instruction)
+    if sent.get("status") == "held":
+        return _done(rec, f"Email '{subject}' to {len(to)} people is held briefly and goes "
+                          f"out automatically unless it's undone first.")
     return _done(rec, f"Email '{subject}' sent to {len(to)} people.")
 
 
@@ -246,5 +249,16 @@ def undo_action(action_id: str, approval_code: str) -> dict:
             "people_told_its_fixed": result.notify if result.success else []}
 
 
+def start_email_sender() -> bool:
+    """Held emails only go out if something releases them when their hold time is up.
+    The server runs for the whole session, so it does that in the background."""
+    starter = getattr(email_tools, "start_background_sender", None)
+    if starter is None:      # older email_tools without holding
+        return False
+    starter()
+    return True
+
+
 if __name__ == "__main__":
+    start_email_sender()
     mcp.run()

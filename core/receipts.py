@@ -15,6 +15,7 @@ and is never given to the agent or to any fixer.
 """
 from __future__ import annotations
 
+import inspect
 import os
 import re
 import unicodedata
@@ -171,12 +172,21 @@ def make_receipts(action: ActionRecord, owner: str | None = None) -> list[dict]:
     return receipts
 
 
+def _send_now(to: list[str], subject: str, body: str) -> None:
+    """Send a receipt or note right away. The agent's own emails are held briefly so
+    they can be undone, but receipts and "it's fixed" notes must never be held."""
+    if "hold_seconds" in inspect.signature(email_tools.email_send).parameters:
+        email_tools.email_send(to, subject, body, hold_seconds=0)
+    else:   # older email_send without a hold
+        email_tools.email_send(to, subject, body)
+
+
 def send_receipts(action: ActionRecord) -> list[dict]:
     """Send every receipt. A failed send never undoes or blocks the action."""
     sent = []
     for r in make_receipts(action):
         try:
-            email_tools.email_send([r["to"]], r["subject"], r["body"])
+            _send_now([r["to"]], r["subject"], r["body"])
             sent.append(r)
         except Exception:
             continue
@@ -224,7 +234,7 @@ def send_fixed_notices(action: ActionRecord, result: UndoResult) -> list[dict]:
     sent = []
     for n in fixed_notices(action, result):
         try:
-            email_tools.email_send([n["to"]], n["subject"], n["body"])
+            _send_now([n["to"]], n["subject"], n["body"])
             sent.append(n)
         except Exception:
             continue

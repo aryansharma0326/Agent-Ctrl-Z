@@ -150,3 +150,22 @@ def test_times_show_their_timezone_so_other_countries_are_not_misled():
     assert rc._when(london).endswith("10:30 AM UTC")
     assert rc._when(india).endswith("UTC+5.5")
     assert rc._when(no_zone).endswith("10:30 AM")
+
+
+def test_receipts_and_notes_are_never_held(action, monkeypatch):
+    calls = []
+
+    def holding_send(to, subject, body, hold_seconds=None):
+        calls.append(hold_seconds)
+        return {"before": None, "after": {"id": "m", "status": "sent"}}
+    monkeypatch.setattr(rc.email_tools, "email_send", holding_send)
+    rc.send_receipts(action)
+    ok = UndoResult(action.action_id, "exact_restore", True, "Put it back.", ["aryan@test.com"])
+    rc.send_fixed_notices(action, ok)
+    assert calls == [0, 0, 0]          # 2 receipts + 1 note, all sent right away
+
+
+def test_older_email_send_without_a_hold_still_works(action, monkeypatch):
+    sent = []
+    monkeypatch.setattr(rc.email_tools, "email_send", lambda to, s, b: sent.append(to))
+    assert len(rc.send_receipts(action)) == 2 and len(sent) == 2
