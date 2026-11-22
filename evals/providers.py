@@ -1,12 +1,14 @@
-"""Free-tier baselines: Google Gemini and the Hugging Face Inference Router.
+"""Free-tier baselines: Google Gemini, Groq and the Hugging Face Inference Router.
 
 Each loop gets the same system prompt, task, calendar tools (evals/sandbox.py)
 and turn cap as the Claude loop, so all baselines are scored identically. Only
 the standard library is used (urllib), so no extra dependencies are needed.
 
   gemini       REST generateContent with function calling. Key: GEMINI_API_KEY.
+  groq         OpenAI-compatible /chat/completions with native tool calling.
+               Key: GROQ_API_KEY. Free tier, rate-limited per minute.
   huggingface  OpenAI-compatible router (/v1/chat/completions) with native tool
-               calling. Key: HF_TOKEN.
+               calling. Key: HF_TOKEN. Needs pre-paid credits or HF PRO.
 
 Both retry HTTP 429 / 5xx with backoff (honouring Retry-After or Gemini's
 retryDelay hint), because free tiers have tight per-minute limits.
@@ -25,9 +27,15 @@ from evals.sandbox import TOOLS, SandboxCalendar, dispatch
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 HF_URL = "https://router.huggingface.co/v1/chat/completions"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+# OpenAI-compatible chat-completions endpoints, all driven by run_openai_compatible.
+OPENAI_URLS = {"groq": GROQ_URL, "huggingface": HF_URL}
 DEFAULT_MODELS = {"gemini": "gemini-3.8-flash",
+                  "groq": "openai/gpt-oss-120b",
                   "huggingface": "meta-llama/Llama-3.3-70B-Instruct"}
-KEY_VARS = {"gemini": "GEMINI_API_KEY", "huggingface": "HF_TOKEN"}
+KEY_VARS = {"gemini": "GEMINI_API_KEY", "groq": "GROQ_API_KEY", "huggingface": "HF_TOKEN"}
+# Some API front ends (Groq's included) reject urllib's default "Python-urllib" agent.
+USER_AGENT = "agent-ctrl-z-evals/1.0"
 # Thinking budgets (tokens) per --effort level for gemini-2.5-* models only; -1 = model
 # decides. Newer Gemini models (the gemini-3.8-flash default) use their own default.
 GEMINI_THINKING = {"off": 0, "low": 1024, "medium": 4096, "high": -1, "xhigh": -1, "max": -1}
@@ -70,7 +78,8 @@ def post_json(url: str, headers: dict, body: dict, log: Callable[[str], None] = 
     data = json.dumps(body).encode()
     for attempt in range(MAX_RETRIES + 1):
         req = urllib.request.Request(url, data=data, method="POST",
-                                     headers={"Content-Type": "application/json", **headers})
+                                     headers={"Content-Type": "application/json",
+                                              "User-Agent": USER_AGENT, **headers})
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
                 return json.loads(resp.read().decode())
@@ -179,17 +188,21 @@ def run_gemini(system: str, task: str, cal: SandboxCalendar, model: str, effort:
     return tr
 
 
-# ------------------------------------------------------------------ Hugging Face
+# ------------------------------------------------------------------ OpenAI-compatible
+# (Groq and the Hugging Face router)
 
 def openai_tools() -> list[dict]:
     return [{"type": "function", "function": {"name": t["name"], "description": t["description"],
                                               "parameters": t["input_schema"]}} for t in TOOLS]
 
 
-def run_huggingface(system: str, task: str, cal: SandboxCalendar, model: str, effort: str,
-                    max_turns: int, post: Optional[Post] = None) -> dict:
+def run_openai_compatible(provider: str, system: str, task: str, cal: SandboxCalendar,
+                          model: str, effort: str, max_turns: int,
+                          post: Optional[Post] = None) -> dict:
+    """Tool-use loop against an OpenAI-style /chat/completions endpoint."""
     post = post or post_json
-    key = api_key("huggingface")
+    url = OPENAI_URLS[provider]
+    key = api_key(provider)
     tr = _new_transcript()
     messages: list[dict] = [{"role": "system", "content": system},
                             {"role": "user", "content": task}]
@@ -198,7 +211,7 @@ def run_huggingface(system: str, task: str, cal: SandboxCalendar, model: str, ef
         body = {"model": model, "messages": messages, "tools": openai_tools(),
                 "tool_choice": "auto", "max_tokens": 4096}
         try:
-            resp = post(HF_URL, {"Authorization": f"Bearer {key}"}, body)
+            resp = post(url, {"Authorization": f"Bearer {key}"}, body)
         except ProviderError as exc:
             tr["stop"] = f"api_error: {exc}"
             break
@@ -236,4 +249,15 @@ def run_huggingface(system: str, task: str, cal: SandboxCalendar, model: str, ef
     return tr
 
 
-RUNNERS = {"gemini": run_gemini, "huggingface": run_huggingface}
+def run_groq(system: str, task: str, cal: SandboxCalendar, model: str, effort: str,
+             max_turns: int, post: Optional[Post] = None) -> dict:
+    return run_openai_compatible("groq", system, task, cal, model, effort, max_turns, post)
+
+
+def run_huggingface(system: str, task: str, cal: SandboxCalendar, model: str, effort: str,
+                    max_turns: int, post: Optional[Post] = None) -> dict:
+    return run_openai_compatible("huggingface", system, task, cal, model, effort, max_turns,
+                                 post)
+
+
+RUNNERS = {"gemini": run_gemini, "groq": run_groq, "huggingface": run_huggingface}

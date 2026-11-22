@@ -8,14 +8,18 @@ calls are then scored against the scenario's ground-truth rubric.
 Providers (--provider), all with identical tools, prompts, turn cap and scoring:
   gemini       (default) Google Gemini REST, free tier. Key: GEMINI_API_KEY.
                Default model gemini-3.8-flash.
+  groq         Groq, OpenAI-compatible tool calling, free tier. Key: GROQ_API_KEY.
+               Default model openai/gpt-oss-120b (Groq retired Llama 3.3 70B).
   huggingface  Hugging Face Inference Router, OpenAI-compatible tool calling.
                Key: HF_TOKEN. Default model meta-llama/Llama-3.3-70B-Instruct.
+               Needs pre-paid HF credits or PRO (HTTP 402 otherwise).
   anthropic    Claude via the Anthropic SDK. Key: ANTHROPIC_API_KEY.
                Default model claude-sonnet-5-5. Costs money.
 Keys are read from the environment, or from the gitignored `.env` at the repo root.
 
 Usage:
   python -m evals.claude_baseline S04                          # Gemini
+  python -m evals.claude_baseline S04 --provider groq
   python -m evals.claude_baseline S04 --provider huggingface
   python -m evals.claude_baseline S04 --provider anthropic --model claude-haiku-5-5
   python -m evals.claude_baseline S04 --mock                   # offline dry run
@@ -28,8 +32,8 @@ numbers are NOT any model's results.
 Cost controls:
   --model      override the provider's default model
   --effort     medium (default); low; off = no extended thinking. Claude effort,
-               or the thinking budget on gemini-2.5-* models; ignored on Hugging Face
-               and newer Gemini models.
+               or the thinking budget on gemini-2.5-* models; ignored on Groq,
+               Hugging Face and newer Gemini models.
   --max-turns  8 model calls per scenario (default)
 HTTP 429s are retried with backoff. Exact token counts and a cost estimate are
 printed after every run.
@@ -77,7 +81,7 @@ load_dotenv()
 
 SCENARIOS_PATH = Path(__file__).resolve().parent / "scenarios_15.json"
 DEFAULT_MODEL = "claude-sonnet-5-5"          # anthropic provider
-PROVIDERS = ["gemini", "huggingface", "anthropic"]
+PROVIDERS = ["gemini", "groq", "huggingface", "anthropic"]
 DEFAULT_PROVIDER = "gemini"
 PROVIDER_DEFAULT_MODELS = {**_FREE_DEFAULTS, "anthropic": DEFAULT_MODEL}
 FREE_TIER_DELAY_S = 3.0
@@ -284,13 +288,15 @@ def _finish(sc: dict, cal: SandboxCalendar, calls: list[dict], mode: str,
 def run_free_provider(sc: dict, provider: str, model: Optional[str] = None,
                       effort: str = DEFAULT_EFFORT, variant: str = "naive",
                       max_turns: int = MAX_TURNS, post: Any = None, **_: Any) -> dict:
-    """Gemini or Hugging Face baseline on the same sandbox, prompt and turn cap."""
+    """Gemini, Groq or Hugging Face baseline on the same sandbox, prompt and turn cap."""
     model = model or PROVIDER_DEFAULT_MODELS[provider]
     cal = SandboxCalendar(sc["current_calendar_state"]["events"])
     system, task = build_prompt(sc, variant)
     tr = RUNNERS[provider](system, task, cal, model, effort, max_turns, post=post)
     if provider == "gemini":
         cost, note = 0.0, "free tier: $0 unless billing is enabled on the key's project"
+    elif provider == "groq":
+        cost, note = 0.0, "free tier: $0 unless the key's Groq org is on a paid plan"
     else:
         cost, note = None, "billed to your Hugging Face credits at the routed provider's rate"
     return _finish(sc, cal, tr["calls"], mode=f"{provider}:{model}", extra={
@@ -382,14 +388,15 @@ def cost_line(res: dict) -> str:
 
 def add_cost_flags(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--provider", default=DEFAULT_PROVIDER, choices=PROVIDERS,
-                    help="gemini (free tier, GEMINI_API_KEY), huggingface (HF_TOKEN) "
+                    help="gemini (free tier, GEMINI_API_KEY), groq (free tier, GROQ_API_KEY), "
+                         "huggingface (HF_TOKEN) "
                          "or anthropic (ANTHROPIC_API_KEY)")
     ap.add_argument("--model", default=None,
                     help="default per provider: " + ", ".join(
                         f"{p} {m}" for p, m in PROVIDER_DEFAULT_MODELS.items()))
     ap.add_argument("--effort", default=DEFAULT_EFFORT, choices=EFFORTS,
                     help="thinking level: Claude effort / gemini-2.5-* thinking budget "
-                         "(ignored on Hugging Face). 'off' = no extended thinking")
+                         "(ignored on Groq and Hugging Face). 'off' = no extended thinking")
     ap.add_argument("--delay", type=float, default=None,
                     help="seconds to sleep between scenarios (default 3 on the free "
                          "providers, 0 on anthropic)")

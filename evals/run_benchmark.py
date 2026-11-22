@@ -3,6 +3,7 @@ repair, then score, compare, save and chart.
 
   python -m evals.run_benchmark --mock                       # offline dry run, no API
   python -m evals.run_benchmark                              # Gemini 3.8 Flash, free tier
+  python -m evals.run_benchmark --provider groq              # gpt-oss-120b via Groq, free tier
   python -m evals.run_benchmark --provider huggingface       # Llama 3.3 70B via HF router
   python -m evals.run_benchmark --provider anthropic         # Claude Sonnet 5.5 (paid)
   python -m evals.run_benchmark --prompt guided              # baseline told the rubric goals
@@ -10,8 +11,8 @@ repair, then score, compare, save and chart.
 
   # several baselines on one chart: save each run, then compare
   python -m evals.run_benchmark --out evals/results_gemini.json
-  python -m evals.run_benchmark --provider huggingface --out evals/results_hf.json
-  python -m evals.run_benchmark --compare evals/results_gemini.json evals/results_hf.json
+  python -m evals.run_benchmark --provider groq --out evals/results_groq.json
+  python -m evals.run_benchmark --compare evals/results_gemini.json evals/results_groq.json
 
 Outputs: a comparison table in the terminal, evals/results.json (with the exact
 provider and model) and evals/comparison_chart.png (failure rate by scenario
@@ -139,7 +140,8 @@ def _pct(x: Optional[dict]) -> str:
 # every bar carries a value label, which covers the low-contrast aqua/yellow.
 BASELINE_COLORS = [BASELINE_COLOR, "#1baf7a", "#eda100"]
 OURS_NAME = "Agent-Ctrl-Z (group repair)"
-PROVIDER_LABELS = {"gemini": "Gemini", "huggingface": "Hugging Face", "anthropic": "Anthropic"}
+PROVIDER_LABELS = {"gemini": "Gemini", "groq": "Groq", "huggingface": "Hugging Face",
+                   "anthropic": "Anthropic"}
 
 
 def baseline_label(provider: Optional[str], model: Optional[str], prompt: str,
