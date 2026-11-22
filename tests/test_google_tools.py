@@ -57,10 +57,10 @@ def test_missing_function_gives_a_clear_error(monkeypatch):
         backend.get_backend()
 
 
-def test_real_placeholders_fail_loudly(monkeypatch):
-    monkeypatch.setenv("USE_REAL_GOOGLE", "1")
-    with pytest.raises(NotImplementedError, match="step 8"):
-        backend.get_backend().get_event("evt_demo")
+def test_real_backend_is_built_not_placeholders():
+    # step 8 filled google_api in; its own tests are in tests/test_google_api.py
+    import inspect
+    assert "isn't built yet" not in inspect.getsource(google_api)
 
 # ---------- step 3: reading the calendar ----------
 @pytest.fixture
