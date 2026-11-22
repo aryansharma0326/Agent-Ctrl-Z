@@ -3,7 +3,8 @@
 MCP server: the only doorway Claude uses to act on Google Calendar and Gmail.
 
 Every tool that changes something goes through the action log first, so each
-action is recorded with a "before" copy and can be undone later. Read-only
+action is recorded with a "before" copy and can be undone later. Then everyone
+affected gets a receipt with a Flag link. Read-only
 tools (list/get) are not logged.
 
 Run it:      python -m core.mcp_server
@@ -20,6 +21,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from core.action_log import log_action
+from core.receipts import send_receipts
 from google_tools import calendar_tools, email_tools
 from shared import db
 
@@ -37,8 +39,10 @@ def get_conn() -> sqlite3.Connection:
 
 
 def _done(rec, message: str) -> dict[str, Any]:
+    """Tell everyone affected (receipts), then report back to Claude."""
+    receipts = send_receipts(rec)
     return {"ok": True, "action_id": rec.action_id, "message": message,
-            "affected_people": rec.affected_people}
+            "affected_people": rec.affected_people, "receipts_sent": len(receipts)}
 
 
 def _fail(message: str) -> dict[str, Any]:

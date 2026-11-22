@@ -11,7 +11,8 @@ the right fixer, save the result, and update the action's status.
 
 "Conflict" means a plain restore could hurt someone: an attendee booked the old
 slot, the event is already back, or a person edited it after the agent did.
-If the exact restore fails, group repair is tried as a fallback.
+If the exact restore fails, group repair is tried as a fallback. After a
+successful undo, everyone in result.notify gets an "it's fixed" note.
 
 The router never raises: it always returns an UndoResult. Flag text is never
 read here (it's untrusted); routing uses only the action log and the calendar.
@@ -21,6 +22,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from core.action_log import owner_email
+from core.receipts import send_fixed_notices
 from google_tools import calendar_tools
 from google_tools.undo_fixes import restore_calendar, undo_email
 from repair.group_repair import group_repair
@@ -144,4 +146,6 @@ def route_undo(conn, action_id: str) -> UndoResult:
     result.action_id = action_id
     db.save_undo_result(conn, result)
     db.set_action_status(conn, action_id, "undone" if result.success else "undo_failed")
+    if result.success:
+        send_fixed_notices(action, result)   # "Sorry, it's fixed!" to whoever's plans changed
     return result
