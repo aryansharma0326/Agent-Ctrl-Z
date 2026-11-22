@@ -1,27 +1,38 @@
-"""Baseline: ask Claude to fix its own flagged calendar mistake, then score it.
+"""Baseline: ask a frontier model to fix its own flagged calendar mistake, then score it.
 
-Claude gets the same calendar tools our system uses (calendar_list / get / create /
+The model gets the same calendar tools our system uses (calendar_list / get / create /
 update / cancel, plus send_notification) on an in-memory sandbox seeded with the
 scenario's calendar, and runs a normal tool-use loop until it stops. Its tool
 calls are then scored against the scenario's ground-truth rubric.
 
+Providers (--provider), all with identical tools, prompts, turn cap and scoring:
+  gemini       (default) Google Gemini REST, free tier. Key: GEMINI_API_KEY.
+               Default model gemini-3.8-flash.
+  huggingface  Hugging Face Inference Router, OpenAI-compatible tool calling.
+               Key: HF_TOKEN. Default model meta-llama/Llama-3.3-70B-Instruct.
+  anthropic    Claude via the Anthropic SDK. Key: ANTHROPIC_API_KEY.
+               Default model claude-sonnet-5-5. Costs money.
+Keys are read from the environment, or from the gitignored `.env` at the repo root.
+
 Usage:
-  python -m evals.claude_baseline S04                # one scenario, real API
-  python -m evals.claude_baseline S04 --mock         # offline dry run
+  python -m evals.claude_baseline S04                          # Gemini
+  python -m evals.claude_baseline S04 --provider huggingface
+  python -m evals.claude_baseline S04 --provider anthropic --model claude-haiku-5-5
+  python -m evals.claude_baseline S04 --mock                   # offline dry run
   python -m evals.claude_baseline S04 --prompt guided
-  python -m evals.claude_baseline S04 --model claude-haiku-5-5 --effort off
 
-Real runs cost money. The API key is read from ANTHROPIC_API_KEY; if that isn't
-set, it is loaded from a `.env` file at the repo root (gitignored), so no
-`source .env` is needed. --mock never calls the API: it replays a scripted
-"blind revert" policy through the same tools and scorer, which is useful for
-testing the pipeline. Mock numbers are NOT Claude's results.
+--mock never calls an API: it replays a scripted "blind revert" policy through
+the same tools and scorer, which is useful for testing the pipeline. Mock
+numbers are NOT any model's results.
 
-Cost controls (defaults are the cheap settings):
-  --model      claude-sonnet-5-5 (default), claude-haiku-5-5 (cheapest), claude-opus-5-5
-  --effort     medium (default); low; off = no extended thinking (Sonnet/Haiku only)
+Cost controls:
+  --model      override the provider's default model
+  --effort     medium (default); low; off = no extended thinking. Claude effort,
+               or the thinking budget on gemini-2.5-* models; ignored on Hugging Face
+               and newer Gemini models.
   --max-turns  8 model calls per scenario (default)
-Exact token counts and an estimated USD cost are printed after every run.
+HTTP 429s are retried with backoff. Exact token counts and a cost estimate are
+printed after every run.
 
 Prompt variants:
   naive  - what an owner would type: "this was flagged, please fix it"
@@ -38,6 +49,8 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
+from evals.providers import DEFAULT_MODELS as _FREE_DEFAULTS
+from evals.providers import RUNNERS, ProviderError
 from evals.sandbox import TOOLS, SandboxCalendar, dispatch
 from evals.scoring import score
 
@@ -63,7 +76,11 @@ def load_dotenv(path: Path = REPO_ROOT / ".env") -> None:
 load_dotenv()
 
 SCENARIOS_PATH = Path(__file__).resolve().parent / "scenarios_15.json"
-DEFAULT_MODEL = "claude-sonnet-5-5"
+DEFAULT_MODEL = "claude-sonnet-5-5"          # anthropic provider
+PROVIDERS = ["gemini", "huggingface", "anthropic"]
+DEFAULT_PROVIDER = "gemini"
+PROVIDER_DEFAULT_MODELS = {**_FREE_DEFAULTS, "anthropic": DEFAULT_MODEL}
+FREE_TIER_DELAY_S = 3.0
 DEFAULT_EFFORT = "medium"
 EFFORTS = ["off", "low", "medium", "high", "xhigh", "max"]
 MAX_TURNS = 8
@@ -264,8 +281,43 @@ def _finish(sc: dict, cal: SandboxCalendar, calls: list[dict], mode: str,
             "writes": cal.ops, "notifications": cal.notifications, **scored, **extra}
 
 
-def run_baseline(sc: dict, mock: bool = False, **kw) -> dict:
-    return run_mock(sc) if mock else run_claude(sc, **kw)
+def run_free_provider(sc: dict, provider: str, model: Optional[str] = None,
+                      effort: str = DEFAULT_EFFORT, variant: str = "naive",
+                      max_turns: int = MAX_TURNS, post: Any = None, **_: Any) -> dict:
+    """Gemini or Hugging Face baseline on the same sandbox, prompt and turn cap."""
+    model = model or PROVIDER_DEFAULT_MODELS[provider]
+    cal = SandboxCalendar(sc["current_calendar_state"]["events"])
+    system, task = build_prompt(sc, variant)
+    tr = RUNNERS[provider](system, task, cal, model, effort, max_turns, post=post)
+    if provider == "gemini":
+        cost, note = 0.0, "free tier: $0 unless billing is enabled on the key's project"
+    else:
+        cost, note = None, "billed to your Hugging Face credits at the routed provider's rate"
+    return _finish(sc, cal, tr["calls"], mode=f"{provider}:{model}", extra={
+        "provider": provider, "model": model, "prompt_variant": variant, "effort": effort,
+        "served_by": sorted(set(tr["served_by"])), "stop_reason": tr["stop"],
+        "final_text": tr["final_text"], "api_calls": tr["api_calls"], "usage": tr["usage"],
+        "est_cost_usd": cost, "cost_exact": cost is not None, "cost_note": note})
+
+
+def run_baseline(sc: dict, mock: bool = False, provider: str = DEFAULT_PROVIDER,
+                 **kw) -> dict:
+    if mock:
+        return {**run_mock(sc), "errored": False}
+    if provider == "anthropic":
+        kw.pop("post", None)
+        res = run_claude(sc, **{**kw, "model": kw.get("model") or DEFAULT_MODEL})
+        res = {**res, "provider": "anthropic", "model": kw.get("model") or DEFAULT_MODEL}
+    else:
+        res = run_free_provider(sc, provider, **kw)
+    # An API failure is not the model's behaviour: flag it so it isn't scored as one.
+    res["errored"] = str(res.get("stop_reason") or "").startswith(("api_error",
+                                                                    "connection_error"))
+    return res
+
+
+def resolve_model(provider: str, model: Optional[str]) -> str:
+    return model or PROVIDER_DEFAULT_MODELS[provider]
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -280,9 +332,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     if sc is None:
         print(f"unknown scenario {args.scenario}", file=sys.stderr)
         return 2
-    res = run_baseline(sc, mock=args.mock, model=args.model, effort=args.effort,
-                       variant=args.prompt, fallbacks=not args.no_fallbacks,
-                       max_turns=args.max_turns)
+    try:
+        res = run_baseline(sc, mock=args.mock, provider=args.provider, model=args.model,
+                           effort=args.effort, variant=args.prompt,
+                           fallbacks=not args.no_fallbacks, max_turns=args.max_turns)
+    except ProviderError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if args.out:
         Path(args.out).write_text(json.dumps(res, indent=2, default=str))
     else:
@@ -296,6 +352,9 @@ def print_summary(res: dict) -> None:
     if "stop_reason" in res:
         print(f"served by {', '.join(res['served_by']) or '-'} · stop_reason "
               f"{res['stop_reason']} · {res.get('api_calls', 0)} API calls")
+    if res.get("errored"):
+        print("!! The API call failed, so this is NOT a valid result. The benchmark "
+              "leaves errored scenarios out of the failure rates.")
     print(f"tool calls: {' -> '.join(c['tool'] for c in res['tool_calls']) or 'none'}")
     for d, v in res["dimensions"].items():
         mark = "  n/a" if v["pass"] is None else (" pass" if v["pass"] else " FAIL")
@@ -306,21 +365,34 @@ def print_summary(res: dict) -> None:
 
 
 def cost_line(res: dict) -> str:
-    """One line with exact token counts and the estimated USD cost of a Claude run."""
+    """One line with exact token counts and the estimated USD cost of a model run."""
     u, cost = res["usage"], res["est_cost_usd"]
-    usd = "unknown (no price for this model)" if cost is None else f"${cost:.4f}" + (
-        "" if res["cost_exact"] else " (approx: a fallback model with no listed price "
-                                     "served some turns)")
+    if res.get("cost_note"):
+        usd = (f"${cost:.4f} · " if cost is not None else "") + res["cost_note"]
+    elif cost is None:
+        usd = "unknown (no price for this model)"
+    else:
+        usd = f"${cost:.4f}" + ("" if res["cost_exact"] else " (approx: a fallback model "
+                                                             "with no listed price served "
+                                                             "some turns)")
     return (f"{res['api_calls']} API calls · input {u['input_tokens']:,} · output "
             f"{u['output_tokens']:,} · cache write {u['cache_creation_input_tokens']:,} · "
             f"cache read {u['cache_read_input_tokens']:,} tokens · est. cost {usd}")
 
 
 def add_cost_flags(ap: argparse.ArgumentParser) -> None:
-    ap.add_argument("--model", default=DEFAULT_MODEL,
-                    help=f"default {DEFAULT_MODEL}; cheapest: claude-haiku-5-5")
+    ap.add_argument("--provider", default=DEFAULT_PROVIDER, choices=PROVIDERS,
+                    help="gemini (free tier, GEMINI_API_KEY), huggingface (HF_TOKEN) "
+                         "or anthropic (ANTHROPIC_API_KEY)")
+    ap.add_argument("--model", default=None,
+                    help="default per provider: " + ", ".join(
+                        f"{p} {m}" for p, m in PROVIDER_DEFAULT_MODELS.items()))
     ap.add_argument("--effort", default=DEFAULT_EFFORT, choices=EFFORTS,
-                    help="'off' = no extended thinking (Sonnet/Haiku only)")
+                    help="thinking level: Claude effort / gemini-2.5-* thinking budget "
+                         "(ignored on Hugging Face). 'off' = no extended thinking")
+    ap.add_argument("--delay", type=float, default=None,
+                    help="seconds to sleep between scenarios (default 3 on the free "
+                         "providers, 0 on anthropic)")
     ap.add_argument("--max-turns", type=int, default=MAX_TURNS,
                     help="maximum model calls per scenario")
     ap.add_argument("--no-fallbacks", action="store_true",
