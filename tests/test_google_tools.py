@@ -6,8 +6,12 @@ checking the switch itself (and the real backend is only placeholders for now).
 import pytest
 
 from fake_data import fake_google
-from fake_data.sample_data import FRIDAY_EVENTS, OWNER
+from fake_data.sample_data import ARYAN, FRIDAY_EVENTS, OWNER, VISISTA
+from fake_data.seed import seed
 from google_tools import backend, calendar_tools as ct, google_api
+from google_tools.undo_fixes import restore_calendar
+from shared import db
+from shared.models import ActionRecord
 
 AGREED_FIELDS = {"id", "summary", "start", "end", "attendees", "description", "location",
                  "organizer", "responses"}
@@ -246,3 +250,99 @@ def test_finished_functions_never_say_placeholder():
     for fn in (ct.calendar_get, ct.calendar_list, ct.calendar_cancel, ct.calendar_update,
                ct.calendar_create):
         assert "PLACEHOLDER" not in inspect.getsource(fn)
+
+
+# ---------- step 5: exact restore ----------
+def _action(tool, target_id, result, affected=(ARYAN,)):
+    """An action record like Varuni's log would save it."""
+    return ActionRecord(tool=tool, target_id=target_id, before=result["before"],
+                        after=result["after"], affected_people=list(affected),
+                        instruction="test")
+
+
+@pytest.fixture
+def stories(tmp_path, monkeypatch):
+    """All demo stories loaded the way the demo loads them: the calendar as it is
+    right AFTER the agent's mistakes, plus one saved action per story."""
+    monkeypatch.setattr(fake_google, "STATE_PATH", tmp_path / "fake_google.json")
+    return seed(db.connect(tmp_path / "undo.db"))
+
+
+def test_story_1_cancelled_demo_prep_comes_back_exactly(stories):
+    action = stories[0]                               # "Clear my Friday"
+    assert ct.calendar_get("evt_demo") is None
+    r = restore_calendar(action)
+    assert r.success and r.fix_type == "exact_restore" and r.new_target_id is None
+    assert ct.calendar_get("evt_demo") == action.before        # same id, same everything
+    assert r.notify == [ARYAN, VISISTA]
+    assert "CS 598 demo prep" in r.details and "Fri Nov 20, 3:00 PM-4:00 PM" in r.details
+
+
+def test_story_2_moved_team_sync_goes_back(stories):
+    action = stories[1]                               # agent moved the team sync
+    assert ct.calendar_get("evt_sync_mon")["start"] == "2026-11-30T14:00"
+    r = restore_calendar(action)
+    assert r.success and r.new_target_id is None
+    now = ct.calendar_get("evt_sync_mon")
+    assert (now["start"], now["end"]) == ("2026-11-23T14:00", "2026-11-23T14:30")
+    assert "Changed back: start, end" in r.details
+
+
+def test_restore_twice_says_nothing_to_do(friday):
+    action = _action("calendar.cancel_event", "evt_demo", ct.calendar_cancel("evt_demo"))
+    assert restore_calendar(action).success
+    again = restore_calendar(action)
+    assert not again.success and "already back" in again.details
+
+
+def test_if_it_cant_be_uncancelled_an_exact_copy_is_made_with_a_new_id(friday, monkeypatch):
+    action = _action("calendar.cancel_event", "evt_demo", ct.calendar_cancel("evt_demo"))
+    monkeypatch.setattr(fake_google, "restore_event", lambda event_id: None)
+    r = restore_calendar(action)
+    assert r.success and r.new_target_id and r.new_target_id != "evt_demo"
+    copy_ = ct.calendar_get(r.new_target_id)
+    for field in ("summary", "start", "end", "attendees", "description", "location"):
+        assert copy_[field] == action.before[field]
+
+
+def test_undo_update_fails_if_the_event_was_cancelled_since(friday):
+    action = _action("calendar.update_event", "evt_demo",
+                     ct.calendar_update("evt_demo", {"start": "2026-11-20T17:00"}))
+    ct.calendar_cancel("evt_demo")
+    r = restore_calendar(action)
+    assert not r.success and "cancelled since" in r.details
+
+
+def test_undo_update_when_it_already_matches_changes_nothing(friday):
+    action = _action("calendar.update_event", "evt_demo",
+                     ct.calendar_update("evt_demo", {"summary": "Renamed"}))
+    ct.calendar_update("evt_demo", {"summary": "CS 598 demo prep"})   # someone fixed it by hand
+    r = restore_calendar(action)
+    assert r.success and r.notify == [] and "already matches" in r.details
+
+
+def test_undo_create_removes_the_created_event(friday):
+    made = ct.calendar_create({"summary": "Oops", "start": "2026-11-23T10:00",
+                               "end": "2026-11-23T11:00"})
+    action = _action("calendar.create_event", made["after"]["id"], made)
+    r = restore_calendar(action)
+    assert r.success and ct.calendar_get(made["after"]["id"]) is None
+
+
+def test_restore_refuses_emails_and_missing_before_copies(friday):
+    email = ActionRecord(tool="email.send", target_id="msg_1", before=None, after={},
+                         affected_people=[], instruction="test")
+    assert not restore_calendar(email).success
+    no_copy = ActionRecord(tool="calendar.cancel_event", target_id="evt_demo", before=None,
+                           after=None, affected_people=[], instruction="test")
+    r = restore_calendar(no_copy)
+    assert not r.success and "no saved 'before' copy" in r.details
+
+
+def test_restore_never_crashes(friday, monkeypatch):
+    action = _action("calendar.cancel_event", "evt_demo", ct.calendar_cancel("evt_demo"))
+    def api_down(event_id):
+        raise RuntimeError("API down")
+    monkeypatch.setattr(fake_google, "restore_event", api_down)
+    r = restore_calendar(action)
+    assert not r.success and r.details == "Restore failed: API down"
