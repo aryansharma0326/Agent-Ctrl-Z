@@ -79,6 +79,16 @@ def _fail(message: str) -> dict[str, Any]:
     return {"ok": False, "message": message}
 
 
+def _attempt(what: str, call):
+    """Run one Google call. If it's refused (e.g. "Friday" instead of a time) or the
+    service fails, return (None, a clear message for the agent) instead of crashing
+    the tool. Nothing is logged in that case, because nothing changed."""
+    try:
+        return call(), None
+    except Exception as exc:
+        return None, _fail(f"Couldn't {what}: {exc}. Nothing was changed.")
+
+
 # ---------- read-only tools (not logged) ----------
 
 @mcp.tool()
@@ -100,7 +110,9 @@ def get_event(event_id: str) -> dict | None:
 def cancel_event(event_id: str, instruction: str) -> dict:
     """Cancel a calendar event.
     instruction: the owner's original request, word for word (e.g. "Clear my Friday")."""
-    result = calendar_tools.calendar_cancel(event_id)
+    result, error = _attempt("cancel the event", lambda: calendar_tools.calendar_cancel(event_id))
+    if error:
+        return error
     if not result.get("before"):
         return _fail(f"Event {event_id} not found, nothing was cancelled.")
     rec = log_action(get_conn(), "calendar.cancel_event", event_id, result, instruction)
@@ -113,7 +125,10 @@ def update_event(event_id: str, changes: dict, instruction: str) -> dict:
     instruction: the owner's original request, word for word."""
     if not changes:
         return _fail("No changes given.")
-    result = calendar_tools.calendar_update(event_id, changes)
+    result, error = _attempt("change the event",
+                             lambda: calendar_tools.calendar_update(event_id, changes))
+    if error:
+        return error
     if not result.get("before"):
         return _fail(f"Event {event_id} not found, nothing was changed.")
     rec = log_action(get_conn(), "calendar.update_event", event_id, result, instruction)
@@ -124,7 +139,9 @@ def update_event(event_id: str, changes: dict, instruction: str) -> dict:
 def create_event(event: dict, instruction: str) -> dict:
     """Create a calendar event: {"summary", "start", "end", "attendees", ...}.
     instruction: the owner's original request, word for word."""
-    result = calendar_tools.calendar_create(event)
+    result, error = _attempt("create the event", lambda: calendar_tools.calendar_create(event))
+    if error:
+        return error
     created = result.get("after")
     if not created or not created.get("id"):
         return _fail("The event could not be created.")
@@ -138,7 +155,9 @@ def send_email(to: list[str], subject: str, body: str, instruction: str) -> dict
     instruction: the owner's original request, word for word."""
     if not to:
         return _fail("No recipients given.")
-    result = email_tools.email_send(to, subject, body)
+    result, error = _attempt("send the email", lambda: email_tools.email_send(to, subject, body))
+    if error:
+        return error
     sent = result.get("after")
     if not sent or not sent.get("id"):
         return _fail("The email could not be sent.")
