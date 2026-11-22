@@ -31,7 +31,7 @@ from types import ModuleType
 FAKE = "fake_data.fake_google"
 REAL = "google_tools.google_api"
 
-REQUIRED = ("get_event", "list_events", "update_event", "delete_event", "send_email")
+REQUIRED = ("get_event", "list_events", "insert_event", "update_event", "delete_event", "restore_event", "send_email")
 
 #Three functions 
 #1) Using real google connection, toggles and returns boolean 

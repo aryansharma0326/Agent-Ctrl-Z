@@ -38,8 +38,12 @@ def update_event(event_id:str, changes:dict) -> dict:
 def delete_event(event_id: str) -> None:
     not_built("delete_event")
 
+#Restoring event - bringing cancelled event back with same id 
+def restore_event(event_id:str)-> dict | None:
+    not_built("restore_event")
+
 #One function for email connection - only sending email , reversal of email still not done 
-def send_email(to: list[str], subject: str, body: str)-> dict:
+def send_email(to: list[str], subject: str, body: str) -> dict:
     not_built("send_email")
 
 
