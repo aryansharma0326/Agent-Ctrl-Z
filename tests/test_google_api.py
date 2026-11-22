@@ -287,3 +287,35 @@ def test_email_correction_on_the_real_backend_threads_with_the_original(google):
     assert r.success and r.fix_type == "email_correction"
     assert gmail.sent[-1]["payload"]["threadId"] == result["after"]["thread_id"]
     assert gmail.sent[-1]["msg"]["Subject"] == "Re: Meeting off"
+
+
+# ---------- Google answering in UTC (seen on the real account, Nov 22) ----------
+def test_utc_times_from_google_become_new_york_time():
+    flat = google_api._flat({"id": "x", "organizer": {"email": OWNER},
+                             "start": {"dateTime": "2026-11-23T20:00:00Z"},
+                             "end": {"dateTime": "2026-11-23T21:00:00Z"}})
+    assert (flat["start"], flat["end"]) == ("2026-11-23T15:00:00-05:00", "2026-11-23T16:00:00-05:00")
+
+
+def test_dropping_the_timezone_still_gives_the_right_new_york_hour():
+    # Aryan's parse_time drops the timezone; after our conversion that is still 3 PM
+    flat = google_api._flat({"id": "x", "start": {"dateTime": "2026-11-23T20:00:00Z"},
+                             "end": {"dateTime": "2026-11-23T21:00:00Z"}})
+    assert datetime.fromisoformat(flat["start"]).replace(tzinfo=None).hour == 15
+
+
+def test_whole_stack_sees_new_york_times_when_google_answers_in_utc(google, monkeypatch):
+    cal, _ = google
+    real_get = cal.get
+    def get_in_utc(calendarId, eventId):            # pretend the account is set to UTC
+        def run():
+            e = real_get(calendarId, eventId).execute()
+            for key in ("start", "end"):
+                t = google_api._parse(e[key]["dateTime"]).astimezone(google_api.timezone.utc)
+                e[key] = {"dateTime": t.strftime("%Y-%m-%dT%H:%M:%SZ")}
+            return e
+        return _Call(run)
+    monkeypatch.setattr(cal, "get", get_in_utc)
+    made = ct.calendar_create({"summary": "Demo", "start": "2026-11-23T15:00",
+                               "end": "2026-11-23T16:00"})["after"]
+    assert ct.calendar_get(made["id"])["start"] == "2026-11-23T15:00:00-05:00"

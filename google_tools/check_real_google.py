@@ -80,7 +80,8 @@ def main() -> None:
     ok(f"calendar_update moved it to {moved['after']['start']} (same length)")
     r = restore_calendar(action("calendar.update_event", event_id, moved, guests))
     back = ct.calendar_get(event_id)
-    (ok if r.success and back["start"][:16] == start else problem)(f"restore_calendar (move): {r.details}")
+    same_time = ct._read_time(back["start"], "start") == ct._read_time(start, "start")
+    (ok if r.success and same_time else problem)(f"restore_calendar (move): {r.details}")
 
     # 4. cancel, then restore with the same id
     cancelled = ct.calendar_cancel(event_id)

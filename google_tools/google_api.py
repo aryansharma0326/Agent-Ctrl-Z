@@ -10,7 +10,8 @@
 #   attendees, description, location, organizer, responses), with the full Google event in "raw"
 # - cancelled events come back as None from get_event and are left out of list_events
 # - restore_event switches a cancelled event back to "confirmed": same id (tested Nov 21)
-# - times without a timezone are New York time
+# - times without a timezone are New York time, and every time Google sends back
+#   is turned into New York time (-05:00), even if Google answers in UTC
 
 #Who gets told: Google sends NO emails for our changes (sendUpdates="none").
 #Our own receipts and "it's fixed" notes do the telling, so nobody gets two emails.
@@ -60,6 +61,14 @@ def _meeting_link(g: dict) -> str:
     return g.get("hangoutLink", "")
 
 
+def _new_york(value: str | None) -> str | None:
+    """Google can answer in UTC ("...20:00:00Z") if the account's calendar is set to UTC.
+    Everyone's code expects New York time, so turn it into "...15:00:00-05:00"."""
+    if not value:
+        return value
+    return _parse(value).astimezone(NEW_YORK).isoformat()
+
+
 def _flat(g: dict) -> dict:
     """One Google event in the agreed flat shape, with the full Google event in "raw"."""
     organizer = (g.get("organizer") or {}).get("email", "")
@@ -71,8 +80,8 @@ def _flat(g: dict) -> dict:
     return {
         "id": g["id"],
         "summary": g.get("summary", "(no title)"),
-        "start": start.get("dateTime") or start.get("date", ""),   # date only = all-day
-        "end": end.get("dateTime") or end.get("date", ""),
+        "start": _new_york(start.get("dateTime")) or start.get("date", ""),   # date only = all-day
+        "end": _new_york(end.get("dateTime")) or end.get("date", ""),
         "attendees": attendees,
         "description": g.get("description", ""),
         "location": g.get("location") or _meeting_link(g),       # Zoom/Meet link if no location
