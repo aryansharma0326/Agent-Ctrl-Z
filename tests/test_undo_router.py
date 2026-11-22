@@ -150,3 +150,46 @@ def test_flag_text_is_never_passed_to_fixers(env):
     r.route_undo(env.conn, rec.action_id)
     assert seen["flagged_by"] == ["student3@test.com"]
     assert "IGNORE" not in str(seen)
+
+
+# ---------- plan_undo: the dry run ----------
+
+def test_plan_matches_what_the_undo_then_does(env):
+    rec = log(env.conn, "calendar.cancel_event", before=DEMO)
+    plan = r.plan_undo(env.conn, rec.action_id)
+    assert plan.can_undo and plan.strategy == "exact_restore"
+    assert plan.what_happened.startswith("cancelled 'CS 598 demo prep'")
+    assert r.route_undo(env.conn, rec.action_id).fix_type == "exact_restore"
+
+
+def test_plan_explains_a_conflict(env):
+    env.calendar["evt_dentist"] = DENTIST
+    plan = r.plan_undo(env.conn, log(env.conn, "calendar.cancel_event", before=DEMO).action_id)
+    assert plan.strategy == "group_repair" and "aryan@test.com booked 'Dentist'" in plan.explanation
+
+
+def test_planning_changes_nothing(env):
+    env.calendar["evt_dentist"] = DENTIST
+    rec = log(env.conn, "calendar.cancel_event", before=DEMO)
+    r.plan_undo(env.conn, rec.action_id)
+    assert env.calls == [] and list(env.calendar) == ["evt_dentist"]
+    assert db.get_action(env.conn, rec.action_id).status == "done"
+    assert db.list_undo_results(env.conn, rec.action_id) == []
+
+
+def test_plan_for_emails_created_events_and_finished_actions(env):
+    email = log(env.conn, "email.send", after={"id": "m1", "subject": "Hi"}, target="m1")
+    made = log(env.conn, "calendar.create_event", after={**DEMO, "id": "evt_new"}, target="evt_new")
+    assert r.plan_undo(env.conn, email.action_id).strategy == "email_correction"
+    assert r.plan_undo(env.conn, made.action_id).strategy == "remove_created_event"
+    db.set_action_status(env.conn, email.action_id, "undone")
+    assert not r.plan_undo(env.conn, email.action_id).can_undo
+    assert not r.plan_undo(env.conn, "act_missing").can_undo
+
+
+def test_a_calendar_outage_while_planning_still_gives_a_plan(env):
+    def down(*a):
+        raise RuntimeError("Calendar API timeout")
+    env.mp.setattr(r.calendar_tools, "calendar_get", down)
+    plan = r.plan_undo(env.conn, log(env.conn, "calendar.cancel_event", before=DEMO).action_id)
+    assert plan.can_undo and "Calendar API timeout" in plan.explanation

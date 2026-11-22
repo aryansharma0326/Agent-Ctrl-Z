@@ -14,15 +14,19 @@ slot, the event is already back, or a person edited it after the agent did.
 If the exact restore fails, group repair is tried as a fallback. After a
 successful undo, everyone in result.notify gets an "it's fixed" note.
 
+plan_undo() is the same decision as a dry run (nothing changes), so the owner or
+the agent can see exactly what an undo will do before it happens.
+
 The router never raises: it always returns an UndoResult. Flag text is never
 read here (it's untrusted); routing uses only the action log and the calendar.
 """
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from core.action_log import owner_email
-from core.receipts import send_fixed_notices
+from core.receipts import describe, send_fixed_notices
 from google_tools import calendar_tools
 from google_tools.undo_fixes import restore_calendar, undo_email
 from repair.group_repair import group_repair
@@ -103,12 +107,12 @@ def _undo_create(action: ActionRecord) -> UndoResult:
                       notify=action.affected_people)
 
 
-def _undo_calendar_change(action: ActionRecord, flagged_by: list[str]) -> UndoResult:
+def _undo_calendar_change(action: ActionRecord, plan: "UndoPlan",
+                          flagged_by: list[str]) -> UndoResult:
     state = {"flagged_by": flagged_by, "owner": owner_email()}
-    conflict = find_conflict(action)
-    if conflict:
+    if plan.strategy == "group_repair":
         result = group_repair(action, state)
-        result.details = f"Plain restore skipped because {conflict}. {result.details}"
+        result.details = f"Plain restore skipped because {plan.conflict}. {result.details}"
         return result
 
     result = restore_calendar(action)
@@ -120,26 +124,80 @@ def _undo_calendar_change(action: ActionRecord, flagged_by: list[str]) -> UndoRe
     return fallback
 
 
+# ---------- the plan (dry run: decides, changes nothing) ----------
+
+@dataclass
+class UndoPlan:
+    """What an undo WOULD do. Building one never changes the calendar or the database."""
+    action_id: str
+    can_undo: bool
+    strategy: str              # exact_restore | group_repair | email_correction |
+                               # remove_created_event | none
+    explanation: str           # plain-English plan, safe to show the owner
+    what_happened: str = ""    # e.g. "cancelled 'CS 598 demo prep' (Fri Nov 20, ...)"
+    will_notify: list[str] = field(default_factory=list)
+    conflict: str | None = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def plan_undo(conn, action_id: str) -> UndoPlan:
+    """Decide how an action would be undone, without doing it. Never raises."""
+    action = db.get_action(conn, action_id)
+    if action is None:
+        return UndoPlan(action_id, False, "none", f"No action with id {action_id}.")
+    what = describe(action)
+    if action.status == "undone":
+        return UndoPlan(action_id, False, "none",
+                        "This action was already undone, so there is nothing to do.", what)
+
+    people = action.affected_people
+    if action.tool == "email.send":
+        return UndoPlan(action_id, True, "email_correction",
+                        f"Stop the email if it is still being held; otherwise send a "
+                        f"correction to the {len(people)} people who got it.", what, people)
+    if action.tool == "calendar.create_event":
+        return UndoPlan(action_id, True, "remove_created_event",
+                        "Remove the event the agent created.", what, people)
+    if action.tool not in ("calendar.cancel_event", "calendar.update_event"):
+        return UndoPlan(action_id, False, "none", f"Don't know how to undo '{action.tool}'.", what)
+
+    try:
+        conflict = find_conflict(action)
+    except Exception as exc:
+        conflict = None
+        note = f" (Couldn't fully check the calendar: {exc}.)"
+    else:
+        note = ""
+    if conflict:
+        return UndoPlan(action_id, True, "group_repair",
+                        f"A plain restore would be unsafe because {conflict}, so group repair "
+                        f"will find the least disruptive fix instead.", what, people, conflict)
+    return UndoPlan(action_id, True, "exact_restore",
+                    "Nothing has changed since, so it will be put back exactly as it was "
+                    "(with group repair as a backup if that fails)." + note, what, people)
+
+
 # ---------- the router ----------
 
 def route_undo(conn, action_id: str) -> UndoResult:
     """Undo one action and return what happened. Never raises."""
+    plan = plan_undo(conn, action_id)
     action = db.get_action(conn, action_id)
-    if action is None:
-        return _fail(action_id, f"No action with id {action_id}.")
-    if action.status == "undone":
-        return _fail(action_id, "This action was already undone, so nothing was changed.")
+    if action is None or action.status == "undone":
+        return _fail(action_id, plan.explanation)
 
     flagged_by = [f.flagged_by for f in db.list_flags(conn) if f.action_id == action_id]
     try:
-        if action.tool == "email.send":
+        if not plan.can_undo:
+            result = _fail(action_id, plan.explanation)
+        elif plan.strategy == "email_correction":
             result = undo_email(action)
-        elif action.tool == "calendar.create_event":
+        elif plan.strategy == "remove_created_event":
             result = _undo_create(action)
-        elif action.tool in ("calendar.cancel_event", "calendar.update_event"):
-            result = _undo_calendar_change(action, flagged_by)
         else:
-            result = _fail(action_id, f"Don't know how to undo '{action.tool}'.")
+            result = _undo_calendar_change(action, plan, flagged_by)
     except Exception as exc:   # a fixer crashed: report it, never crash the dashboard
         result = _fail(action_id, f"Undo failed before finishing: {exc}")
 
