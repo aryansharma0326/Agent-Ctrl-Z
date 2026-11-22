@@ -3,13 +3,16 @@
 These never touch real Google: every test forces the fake calendar unless it is
 checking the switch itself (and the real backend is only placeholders for now).
 """
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from fake_data import fake_google
 from fake_data.sample_data import ARYAN, FRIDAY_EVENTS, OWNER, VISISTA
 from fake_data.seed import seed
 from google_tools import backend, calendar_tools as ct, google_api
-from google_tools.undo_fixes import restore_calendar
+from google_tools import email_tools
+from google_tools.undo_fixes import restore_calendar, undo_email
 from shared import db
 from shared.models import ActionRecord
 
@@ -346,3 +349,142 @@ def test_restore_never_crashes(friday, monkeypatch):
     monkeypatch.setattr(fake_google, "restore_event", api_down)
     r = restore_calendar(action)
     assert not r.success and r.details == "Restore failed: API down"
+
+
+# ---------- step 6: email hold + undo ----------
+TEAM_TO = ["aryan@test.com", "visista@test.com"]
+
+
+def _later(seconds):
+    return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+
+
+def _sent():
+    fake_google._load()
+    return fake_google.SENT_EMAILS
+
+
+def _email_action(result, affected=None):
+    after = result["after"]
+    return ActionRecord(tool="email.send", target_id=after["id"], before=None, after=after,
+                        affected_people=list(affected if affected is not None else after["to"]),
+                        instruction="test")
+
+
+def test_outbox_sits_next_to_the_fake_calendar_so_tests_stay_separate(friday, tmp_path):
+    assert email_tools.outbox_path() == tmp_path / "outbox.db"
+
+
+def test_email_is_held_by_default_and_nothing_is_sent_yet(friday):
+    after = email_tools.email_send(TEAM_TO, "Meeting off", "No meeting today")["after"]
+    assert after["status"] == "held" and after["id"].startswith("held_")
+    assert after["to"] == TEAM_TO and after["subject"] == "Meeting off"
+    assert email_tools.email_status(after["id"]) == "held"
+    assert _sent() == []
+
+
+def test_hold_time_can_be_changed_with_a_setting(friday, monkeypatch):
+    monkeypatch.setenv("CTRLZ_EMAIL_HOLD_SECONDS", "120")
+    after = email_tools.email_send(TEAM_TO, "s", "b")["after"]
+    send_at = datetime.fromisoformat(after["send_at"])
+    assert timedelta(seconds=115) < send_at - datetime.now(timezone.utc) <= timedelta(seconds=120)
+
+
+def test_hold_seconds_0_sends_right_away(friday):
+    after = email_tools.email_send(TEAM_TO, "Receipt", "b", hold_seconds=0)["after"]
+    assert after["status"] == "sent" and after["id"].startswith("msg_") and after["thread_id"]
+    assert [m["subject"] for m in _sent()] == ["Receipt"]
+
+
+def test_bad_recipients_are_refused(friday):
+    with pytest.raises(ValueError, match="at least one"):
+        email_tools.email_send([], "s", "b")
+    with pytest.raises(ValueError, match="not an email address"):
+        email_tools.email_send(["aryan"], "s", "b")
+    assert email_tools.email_send("aryan@test.com", "s", "b")["after"]["to"] == ["aryan@test.com"]
+
+
+def test_held_email_goes_out_when_its_time_is_up_and_only_once(friday):
+    held = email_tools.email_send(TEAM_TO, "Meeting off", "b")["after"]
+    assert email_tools.release_held_emails() == []                  # not yet
+    released = email_tools.release_held_emails(now=_later(61))
+    assert [r["id"] for r in released] == [held["id"]]
+    assert email_tools.email_status(held["id"]) == "sent"
+    assert email_tools.release_held_emails(now=_later(61)) == []    # never twice
+    assert len(_sent()) == 1
+
+
+def test_if_sending_fails_it_is_tried_again_later(friday, monkeypatch):
+    email_tools.email_send(TEAM_TO, "s", "b")
+    real_send = fake_google.send_email
+    def gmail_down(*args, **kwargs):
+        raise RuntimeError("Gmail is down")
+    monkeypatch.setattr(fake_google, "send_email", gmail_down)
+    assert email_tools.release_held_emails(now=_later(61)) == []
+    monkeypatch.setattr(fake_google, "send_email", real_send)
+    assert len(email_tools.release_held_emails(now=_later(61))) == 1
+
+
+def test_undo_while_held_stops_it_and_nobody_gets_anything(friday):
+    action = _email_action(email_tools.email_send(TEAM_TO, "Meeting off", "b"))
+    r = undo_email(action)
+    assert r.success and r.fix_type == "email_unsent" and r.notify == []
+    assert "Nobody received it" in r.details
+    assert email_tools.release_held_emails(now=_later(61)) == []
+    assert _sent() == []
+
+
+def test_undo_twice_while_held_says_already_stopped(friday):
+    action = _email_action(email_tools.email_send(TEAM_TO, "Meeting off", "b"))
+    undo_email(action)
+    again = undo_email(action)
+    assert not again.success and "already stopped" in again.details
+
+
+def test_undo_after_it_went_out_sends_a_correction_in_the_same_thread(friday):
+    action = _email_action(email_tools.email_send(TEAM_TO, "Meeting off", "b"))
+    original = email_tools.release_held_emails(now=_later(61))[0]["message"]
+    r = undo_email(action)
+    assert r.success and r.fix_type == "email_correction" and r.notify == []
+    correction = _sent()[-1]
+    assert correction["to"] == TEAM_TO
+    assert correction["subject"] == "Re: Meeting off"
+    assert correction["thread_id"] == original["thread_id"]
+    assert "Please ignore my earlier email" in correction["body"]
+
+
+def test_undo_while_it_is_being_sent_asks_to_try_again(friday):
+    action = _email_action(email_tools.email_send(TEAM_TO, "s", "b"))
+    with email_tools._outbox() as db:
+        db.execute("UPDATE held_emails SET status = 'sending'")
+    r = undo_email(action)
+    assert not r.success and "being sent right now" in r.details
+
+
+def test_story_3_class_email_gets_a_correction_to_the_30_classmates(stories):
+    action = stories[2]                               # emailed the whole class
+    r = undo_email(action)
+    assert r.success and r.fix_type == "email_correction"
+    correction = _sent()[-1]
+    assert correction["to"] == action.affected_people and len(correction["to"]) == 30
+    assert correction["thread_id"] == action.after["thread_id"]
+    assert "30 people" in r.details and "and 27 more" in r.details
+
+
+def test_correction_never_contains_the_flag_text(stories):
+    undo_email(stories[2])
+    assert "Which meeting?" not in _sent()[-1]["body"]   # the flag said this
+
+
+def test_undo_email_refuses_calendar_actions(friday):
+    action = _action("calendar.cancel_event", "evt_demo", ct.calendar_cancel("evt_demo"))
+    assert not undo_email(action).success
+
+
+def test_undo_email_never_crashes(friday, monkeypatch):
+    action = _email_action(email_tools.email_send(TEAM_TO, "s", "b", hold_seconds=0))
+    def gmail_down(*args, **kwargs):
+        raise RuntimeError("Gmail is down")
+    monkeypatch.setattr(fake_google, "send_email", gmail_down)
+    r = undo_email(action)
+    assert not r.success and r.details == "Email undo failed: Gmail is down"

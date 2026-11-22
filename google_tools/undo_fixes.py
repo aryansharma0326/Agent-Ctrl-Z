@@ -2,7 +2,7 @@
 CALLED BY: Varuni's undo router
 
 Step 5 (built): restore_calendar puts a calendar event back exactly as it was.
-Step 6 (still a placeholder): undo_email.
+Step 6 (built): undo_email stops a held email, or sends a correction if it already went out.
 
 These only RETURN an UndoResult. Varuni's router saves it to undo.db, marks the action
 undone, and sends the "it's fixed" messages to the people in result.notify.
@@ -11,6 +11,7 @@ if a restore can't be done, success=False and the router falls back to group rep
 """
 from datetime import datetime
 
+from google_tools import email_tools
 from google_tools.backend import get_backend
 from google_tools.calendar_tools import (EDITABLE, NEW_YORK, _read_time, calendar_cancel,
                                          calendar_create, calendar_get)
@@ -121,7 +122,60 @@ def restore_calendar(action: ActionRecord) -> UndoResult:
         return _result(action, False, f"Restore failed: {exc}")
 
 
+CORRECTION_BODY = ("Hi,\n\nPlease ignore my earlier email \"{subject}\". "
+                   "My AI assistant sent it to you by mistake.\n\nSorry for the confusion.")
+
+
+def _people(emails: list[str]) -> str:
+    shown = ", ".join(emails[:3])
+    return shown + (f" and {len(emails) - 3} more" if len(emails) > 3 else "")
+
+
+def _email_result(action: ActionRecord, fix_type: str, success: bool, details: str) -> UndoResult:
+    # notify is always empty: a stopped email reached nobody, and for a sent one the
+    # correction IS the message, so the router shouldn't send a second "it's fixed" email.
+    return UndoResult(action_id=action.action_id, fix_type=fix_type, success=success,
+                      details=details, notify=[])
+
+
 def undo_email(action: ActionRecord) -> UndoResult:
-    """Stop the email if it's still being held, otherwise send a correction."""
-    return UndoResult(action_id=action.action_id, fix_type="email_correction", success=False,
-                      details="PLACEHOLDER: undo_email not built yet", notify=[])
+    """Stop the email if it's still being held, otherwise send a correction.
+    The correction is a fixed message (never the flag text), sent as a reply in the same
+    thread, to the people in affected_people. Never raises."""
+    try:
+        if action.tool != "email.send":
+            return _email_result(action, "email_correction", False,
+                                 f"undo_email only undoes emails, not {action.tool}.")
+        email_id = action.target_id
+        subject = (action.after or {}).get("subject") or "(no subject)"
+
+        if email_tools.stop_held_email(email_id):
+            return _email_result(action, "email_unsent", True,
+                                 f"Stopped the email '{subject}' before it went out. "
+                                 "Nobody received it.")
+
+        status = email_tools.email_status(email_id)
+        if status == "stopped":
+            return _email_result(action, "email_unsent", False,
+                                 f"The email '{subject}' was already stopped; it never went out.")
+        if status == "sending":
+            return _email_result(action, "email_correction", False,
+                                 f"The email '{subject}' is being sent right now. "
+                                 "Try again in a few seconds.")
+
+        # It already went out: send a correction in the same thread.
+        original = email_tools.sent_message(email_id) or action.after or {}
+        people = list(action.affected_people or original.get("to") or [])
+        if not people:
+            return _email_result(action, "email_correction", False,
+                                 f"The email '{subject}' already went out, but there's no one "
+                                 "to send a correction to.")
+        get_backend().send_email(people, f"Re: {subject}",
+                                 CORRECTION_BODY.format(subject=subject), reply_to=original)
+        n = len(people)
+        return _email_result(action, "email_correction", True,
+                             f"The email '{subject}' had already gone out, so a correction "
+                             f"asking people to ignore it went to {n} "
+                             f"{'person' if n == 1 else 'people'}: {_people(people)}.")
+    except Exception as exc:
+        return _email_result(action, "email_correction", False, f"Email undo failed: {exc}")

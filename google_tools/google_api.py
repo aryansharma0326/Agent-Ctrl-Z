@@ -43,7 +43,7 @@ def restore_event(event_id:str)-> dict | None:
     not_built("restore_event")
 
 #One function for email connection - only sending email , reversal of email still not done 
-def send_email(to: list[str], subject: str, body: str) -> dict:
+def send_email(to: list[str], subject: str, body: str, reply_to: dict | None = None) -> dict:
     not_built("send_email")
 
 
