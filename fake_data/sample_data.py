@@ -13,8 +13,13 @@ TEAM = [OWNER, ARYAN, VISISTA]
 CLASS_LIST = TEAM + [f"student{i}@test.com" for i in range(1, 31)]  # + 30 classmates
 
 
-def event(id, summary, start, end, attendees):
-    return {"id": id, "summary": summary, "start": start, "end": end, "attendees": attendees}
+def event(id, summary, start, end, attendees, description="", location="", organizer="",
+          responses=None):
+    """One event in the shape everyone agreed on. Times without a timezone mean New York
+    time (-05:00). responses = {email: "accepted" | "declined" | "tentative" | "needsAction"}."""
+    return {"id": id, "summary": summary, "start": start, "end": end, "attendees": attendees,
+            "description": description, "location": location, "organizer": organizer,
+            "responses": responses or {}}
 
 
 # Story 1 data (also used directly by the end-to-end test)
