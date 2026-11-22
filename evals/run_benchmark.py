@@ -2,7 +2,9 @@
 score, compare, save and chart.
 
   python -m evals.run_benchmark --mock              # offline dry run (no API calls)
-  python -m evals.run_benchmark                     # real Claude baseline (costs money)
+  python -m evals.run_benchmark                     # real Claude baseline (costs money):
+                                                    #   Sonnet 5.5, effort medium, <= 8 turns
+  python -m evals.run_benchmark --model claude-haiku-5-5 --effort off   # cheapest
   python -m evals.run_benchmark --prompt guided     # baseline told the rubric goals
   python -m evals.run_benchmark --only S04 S11      # a subset
 
@@ -23,7 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from evals.claude_baseline import DEFAULT_MODEL, USAGE_FIELDS, load_scenarios, run_baseline
+from evals.claude_baseline import (USAGE_FIELDS, add_cost_flags, cost_line, load_scenarios,
+                                   run_baseline)
 from evals.sandbox import SandboxCalendar
 from evals.scoring import DIMENSION_LABELS, DIMENSIONS, score
 from repair.group_repair import apply_plan, plan_group_repair
@@ -186,10 +189,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Claude self-repair vs. group repair benchmark")
     ap.add_argument("--mock", action="store_true",
                     help="offline: scripted blind-revert baseline instead of the Claude API")
-    ap.add_argument("--model", default=DEFAULT_MODEL)
-    ap.add_argument("--effort", default="high", choices=["low", "medium", "high", "xhigh", "max"])
+    add_cost_flags(ap)
     ap.add_argument("--prompt", default="naive", choices=["naive", "guided"])
-    ap.add_argument("--no-fallbacks", action="store_true")
     ap.add_argument("--only", nargs="*", help="scenario ids to run")
     ap.add_argument("--out", default=str(HERE / "results.json"))
     ap.add_argument("--chart", default=str(HERE / "comparison_chart.png"))
@@ -204,7 +205,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"running {s['id']} ({s['category']}) ...", flush=True)
         base_runs.append(run_baseline(s, mock=args.mock, model=args.model,
                                       effort=args.effort, variant=args.prompt,
-                                      fallbacks=not args.no_fallbacks))
+                                      fallbacks=not args.no_fallbacks,
+                                      max_turns=args.max_turns))
+        if "usage" in base_runs[-1]:
+            print(f"  {cost_line(base_runs[-1])}", flush=True)
         our_runs.append(run_ours(s))
 
     baseline_name = "Mock blind revert" if args.mock else f"Claude ({args.model}, {args.prompt})"
@@ -227,6 +231,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "baseline": {"name": baseline_name, "mock": args.mock, "model": None if args.mock
                      else args.model, "effort": args.effort, "prompt_variant": args.prompt,
+                     "max_turns": args.max_turns,
                      "fallbacks": not args.no_fallbacks and not args.mock, "cost": cost},
         "summary": {"baseline": base_rates, "ours": our_rates},
         "runs": {"baseline": base_runs, "ours": our_runs},

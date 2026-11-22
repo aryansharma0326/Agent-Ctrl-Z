@@ -9,11 +9,19 @@ Usage:
   python -m evals.claude_baseline S04                # one scenario, real API
   python -m evals.claude_baseline S04 --mock         # offline dry run
   python -m evals.claude_baseline S04 --prompt guided
+  python -m evals.claude_baseline S04 --model claude-haiku-5-5 --effort off
 
-Real runs read credentials the usual way (ANTHROPIC_API_KEY, or an `ant auth login`
-profile) and cost money. --mock never calls the API: it replays a scripted
+Real runs cost money. The API key is read from ANTHROPIC_API_KEY; if that isn't
+set, it is loaded from a `.env` file at the repo root (gitignored), so no
+`source .env` is needed. --mock never calls the API: it replays a scripted
 "blind revert" policy through the same tools and scorer, which is useful for
 testing the pipeline. Mock numbers are NOT Claude's results.
+
+Cost controls (defaults are the cheap settings):
+  --model      claude-sonnet-5-5 (default), claude-haiku-5-5 (cheapest), claude-opus-5-5
+  --effort     medium (default); low; off = no extended thinking (Sonnet/Haiku only)
+  --max-turns  8 model calls per scenario (default)
+Exact token counts and an estimated USD cost are printed after every run.
 
 Prompt variants:
   naive  - what an owner would type: "this was flagged, please fix it"
@@ -25,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -32,22 +41,75 @@ from typing import Any, Optional
 from evals.sandbox import TOOLS, SandboxCalendar, dispatch
 from evals.scoring import score
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_dotenv(path: Path = REPO_ROOT / ".env") -> None:
+    """Minimal .env reader (no extra dependency). Existing environment variables
+    win; values are never printed."""
+    if not path.is_file():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.removeprefix("export ").partition("=")
+        key, val = key.strip(), val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "'\"":
+            val = val[1:-1]
+        os.environ.setdefault(key, val)
+
+
+load_dotenv()
+
 SCENARIOS_PATH = Path(__file__).resolve().parent / "scenarios_15.json"
-DEFAULT_MODEL = "claude-opus-5-5"
-MAX_TURNS = 20
+DEFAULT_MODEL = "claude-sonnet-5-5"
+DEFAULT_EFFORT = "medium"
+EFFORTS = ["off", "low", "medium", "high", "xhigh", "max"]
+MAX_TURNS = 8
+NO_FALLBACK_MODELS = {"claude-haiku-5-5"}          # the API rejects `fallbacks` here
+THINKING_OFF = {"claude-sonnet-5-5": {"type": "between_tools"},
+                "claude-haiku-5-5": {"type": "disabled"}}
 
 # USD per million tokens: input, output, 5-minute cache write, cache read.
-PRICES = {"claude-opus-5-5": (4.00, 20.00, 5.00, 0.20)}
+PRICES = {
+    "claude-opus-5-5": (4.00, 20.00, 5.00, 0.20),
+    "claude-sonnet-5-5": (2.00, 10.00, 2.50, 0.10),
+    "claude-sonnet-5": (2.00, 10.00, 2.50, 0.20),      # Sonnet 5.5's fallback model
+    "claude-haiku-5-5": (0.10, 0.50, 0.125, 0.01),     # prompts of 100K tokens or fewer
+}
+HAIKU_LONG_PROMPT = (0.50, 2.50, 0.625, 0.05)          # Haiku 5.5 above 100K-token prompts
 USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens",
                 "cache_read_input_tokens")
 
 
-def estimate_cost(usage: dict, model: str) -> Optional[float]:
-    """Dollar estimate from summed usage; None if we have no price for the model."""
+def call_cost(usage: dict, model: str) -> Optional[float]:
+    """Dollar cost of one API response, or None if we have no price for the model."""
     p = PRICES.get(model)
-    if not p:
+    if p is None:
         return None
-    return sum(usage.get(f, 0) * rate for f, rate in zip(USAGE_FIELDS, p)) / 1e6
+    prompt = usage["input_tokens"] + usage["cache_creation_input_tokens"] + \
+        usage["cache_read_input_tokens"]
+    if model == "claude-haiku-5-5" and prompt > 100_000:
+        p = HAIKU_LONG_PROMPT
+    return sum(usage[f] * rate for f, rate in zip(USAGE_FIELDS, p)) / 1e6
+
+
+def request_options(model: str, effort: str, fallbacks: bool) -> dict[str, Any]:
+    """Per-request settings that depend on the model and effort choice."""
+    opts: dict[str, Any] = {}
+    if effort == "off":
+        if model not in THINKING_OFF:
+            raise ValueError(f"--effort off isn't supported on {model}; use low instead")
+        opts["thinking"] = THINKING_OFF[model]
+        opts["output_config"] = {"effort": "low"}
+    else:
+        opts["output_config"] = {"effort": effort}
+    if fallbacks and model not in NO_FALLBACK_MODELS:
+        # on a policy decline, the API re-runs the request on a fallback model
+        opts["betas"] = ["server-side-fallback-2026-07-01"]
+        opts["fallbacks"] = "default"
+    return opts
 
 SYSTEM_PROMPT = """You are the calendar assistant for {owner}. You act on their Google \
 Calendar using the tools provided. Today is {now}. Creating, updating or cancelling an \
@@ -96,30 +158,29 @@ def build_prompt(sc: dict, variant: str = "naive") -> tuple[str, str]:
 
 # ------------------------------------------------------------------ real Claude
 
-def run_claude(sc: dict, model: str = DEFAULT_MODEL, effort: str = "high",
+def run_claude(sc: dict, model: str = DEFAULT_MODEL, effort: str = DEFAULT_EFFORT,
                variant: str = "naive", fallbacks: bool = True,
-               client: Any = None) -> dict:
+               max_turns: int = MAX_TURNS, client: Any = None) -> dict:
     import anthropic
 
+    opts = request_options(model, effort, fallbacks)   # validate before any billed call
     client = client or anthropic.Anthropic()
     cal = SandboxCalendar(sc["current_calendar_state"]["events"])
     system, task = build_prompt(sc, variant)
     messages: list[dict] = [{"role": "user", "content": task}]
     calls, served_by, final_text, stop = [], [], "", None
     usage = {f: 0 for f in USAGE_FIELDS}
+    cost: Optional[float] = 0.0
+    cost_exact = True
     api_calls = 0
-    extra: dict[str, Any] = {}
-    if fallbacks:   # on a policy decline, the API re-runs the request on a fallback model
-        extra = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
 
-    for _ in range(MAX_TURNS):
+    for _ in range(max_turns):
         try:
             # Automatic prompt caching: each turn re-sends the growing history, so
             # later turns read the earlier prefix from cache instead of paying full price.
             resp = client.beta.messages.create(
-                model=model, max_tokens=16000, system=system, tools=TOOLS,
-                messages=messages, output_config={"effort": effort},
-                cache_control={"type": "ephemeral"}, **extra)
+                model=model, max_tokens=8000, system=system, tools=TOOLS,
+                messages=messages, cache_control={"type": "ephemeral"}, **opts)
         except anthropic.APIStatusError as exc:
             stop = f"api_error {exc.status_code}: {exc.message}"
             break
@@ -128,8 +189,14 @@ def run_claude(sc: dict, model: str = DEFAULT_MODEL, effort: str = "high",
             break
         api_calls += 1
         served_by.append(resp.model)
+        this = {f: getattr(resp.usage, f, 0) or 0 for f in USAGE_FIELDS}
         for f in USAGE_FIELDS:
-            usage[f] += getattr(resp.usage, f, 0) or 0
+            usage[f] += this[f]
+        # Price each response at the rate of the model that actually served it.
+        c = call_cost(this, resp.model)
+        if c is None:                       # unknown fallback model: use requested rates
+            c, cost_exact = call_cost(this, model), False
+        cost = None if c is None or cost is None else cost + c
         stop = resp.stop_reason
         messages.append({"role": "assistant", "content": resp.content})
         if resp.stop_reason != "tool_use":
@@ -150,17 +217,12 @@ def run_claude(sc: dict, model: str = DEFAULT_MODEL, effort: str = "high",
             calls.append(entry)
         messages.append({"role": "user", "content": results})
     else:
-        stop = "max_turns"
+        stop = f"max_turns ({max_turns})"
 
-    served = sorted(set(served_by))
-    # Priced at the requested model's rates; if a fallback model served any turn the
-    # figure is approximate (fallbacks bill at their own model's price).
-    cost = estimate_cost(usage, model)
     return _finish(sc, cal, calls, mode=f"claude:{model}", extra={
-        "prompt_variant": variant, "effort": effort, "served_by": served,
+        "prompt_variant": variant, "effort": effort, "served_by": sorted(set(served_by)),
         "stop_reason": stop, "final_text": final_text, "api_calls": api_calls,
-        "usage": usage, "est_cost_usd": cost,
-        "cost_exact": cost is not None and served in ([], [model])})
+        "usage": usage, "est_cost_usd": cost, "cost_exact": cost is not None and cost_exact})
 
 
 # ------------------------------------------------------------------ offline mock
@@ -210,11 +272,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("scenario", help="scenario id, e.g. S04")
     ap.add_argument("--mock", action="store_true", help="offline scripted dry run")
-    ap.add_argument("--model", default=DEFAULT_MODEL)
-    ap.add_argument("--effort", default="high", choices=["low", "medium", "high", "xhigh", "max"])
+    add_cost_flags(ap)
     ap.add_argument("--prompt", default="naive", choices=["naive", "guided"])
-    ap.add_argument("--no-fallbacks", action="store_true",
-                    help="don't let the API re-run a declined request on another model")
     ap.add_argument("--out", help="save the full JSON result here instead of printing it")
     args = ap.parse_args(argv)
     sc = next((s for s in load_scenarios() if s["id"] == args.scenario), None)
@@ -222,7 +281,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"unknown scenario {args.scenario}", file=sys.stderr)
         return 2
     res = run_baseline(sc, mock=args.mock, model=args.model, effort=args.effort,
-                       variant=args.prompt, fallbacks=not args.no_fallbacks)
+                       variant=args.prompt, fallbacks=not args.no_fallbacks,
+                       max_turns=args.max_turns)
     if args.out:
         Path(args.out).write_text(json.dumps(res, indent=2, default=str))
     else:
@@ -242,12 +302,29 @@ def print_summary(res: dict) -> None:
         print(f"  {mark}  {d:26} {v['why']}")
     print(f"  overall: {'PASSED' if res['passed'] else 'FAILED'}")
     if "usage" in res:
-        u = res["usage"]
-        cost = res["est_cost_usd"]
-        print("tokens: " + ", ".join(f"{k} {v:,}" for k, v in u.items()))
-        print("est. cost: " + ("unknown (no price for this model)" if cost is None else
-              f"${cost:.4f}" + ("" if res["cost_exact"] else " (approx: a fallback model "
-                                                           "served some turns)")))
+        print(cost_line(res))
+
+
+def cost_line(res: dict) -> str:
+    """One line with exact token counts and the estimated USD cost of a Claude run."""
+    u, cost = res["usage"], res["est_cost_usd"]
+    usd = "unknown (no price for this model)" if cost is None else f"${cost:.4f}" + (
+        "" if res["cost_exact"] else " (approx: a fallback model with no listed price "
+                                     "served some turns)")
+    return (f"{res['api_calls']} API calls · input {u['input_tokens']:,} · output "
+            f"{u['output_tokens']:,} · cache write {u['cache_creation_input_tokens']:,} · "
+            f"cache read {u['cache_read_input_tokens']:,} tokens · est. cost {usd}")
+
+
+def add_cost_flags(ap: argparse.ArgumentParser) -> None:
+    ap.add_argument("--model", default=DEFAULT_MODEL,
+                    help=f"default {DEFAULT_MODEL}; cheapest: claude-haiku-5-5")
+    ap.add_argument("--effort", default=DEFAULT_EFFORT, choices=EFFORTS,
+                    help="'off' = no extended thinking (Sonnet/Haiku only)")
+    ap.add_argument("--max-turns", type=int, default=MAX_TURNS,
+                    help="maximum model calls per scenario")
+    ap.add_argument("--no-fallbacks", action="store_true",
+                    help="don't let the API re-run a declined request on another model")
 
 
 if __name__ == "__main__":
