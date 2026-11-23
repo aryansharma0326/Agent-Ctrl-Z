@@ -401,7 +401,9 @@ def test_failed_write_reports_failure_and_notifies_nobody():
 
 def test_adapter_falls_back_to_fake_while_google_tools_is_placeholder(monkeypatch):
     monkeypatch.setenv("CTRLZ_CALENDAR_BACKEND", "auto")
-    assert calendar_adapter.google_tools_is_placeholder()
+    # Pin the placeholder check so the test doesn't depend on whether
+    # google_tools/calendar_tools.py is the stub or the real Calendar API.
+    monkeypatch.setattr(calendar_adapter, "google_tools_is_placeholder", lambda: True)
     assert calendar_adapter.get_calendar().name == "fake_google"
     monkeypatch.setattr(calendar_adapter, "google_tools_is_placeholder", lambda: False)
     assert calendar_adapter.get_calendar().name == "google_tools"
