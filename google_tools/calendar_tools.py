@@ -7,6 +7,9 @@ Step 4 (built): calendar_cancel, calendar_update and calendar_create change it. 
 reads the event first and returns {"before": ..., "after": ...}; Varuni's action log
 stores those copies (nothing is saved here).
 Everything goes through get_backend(), so it works on the fake calendar and real Google.
+Security checks (security.py) run on every change: alerts to the owner for unknown guests,
+too many new meetings, too many changes; links are checked; and with check_schedule=True
+the agent can't book over another meeting or without a 15-minute gap.
 
 Every event comes back in the agreed flat shape: id, summary, start, end, attendees,
 description, location, organizer, responses (+ raw on real Google).
@@ -16,6 +19,7 @@ Times without a timezone mean New York time (-05:00).
 import copy
 from datetime import datetime, timedelta, timezone
 
+from google_tools import security
 from google_tools.backend import get_backend
 
 NEW_YORK = timezone(timedelta(hours=-5))
@@ -124,14 +128,17 @@ def calendar_cancel(event_id: str) -> dict:
     if before is None:
         return {"before": None, "after": None}
     get_backend().delete_event(event_id)
+    security.after_change("cancel", before)
     return {"before": before, "after": None}
 
 
-def calendar_update(event_id: str, changes: dict) -> dict:
+def calendar_update(event_id: str, changes: dict, *, check_schedule: bool = False) -> dict:
     """Save a copy of the event, then apply changes (e.g. new start/end).
     Returns {"before": <event dict>, "after": <updated event dict>}.
     Changing only "start" keeps the meeting's length (the end moves with it).
-    If there's no such event, nothing happens and "before" is None."""
+    If there's no such event, nothing happens and "before" is None.
+    check_schedule=True (for the agent's own moves): refuse a time that collides with
+    another meeting or leaves less than 15 minutes between them, and suggest a free time."""
     before = calendar_get(event_id)
     if before is None:
         return {"before": None, "after": None}
@@ -142,20 +149,34 @@ def calendar_update(event_id: str, changes: dict) -> dict:
         length = _read_time(before["end"], "end") - _read_time(before["start"], "start")
         clean["end"] = _same_style(clean["start"], _read_time(clean["start"], "start") + length)
     _check_order(clean.get("start", before["start"]), clean.get("end", before["end"]))
-    after = get_backend().update_event(event_id, clean)
-    return {"before": before, "after": _shape(after)}
+    new_start, new_end = clean.get("start", before["start"]), clean.get("end", before["end"])
+    if check_schedule and ("start" in clean or "end" in clean):
+        security.check_schedule(new_start, new_end, ignore_id=event_id)        # check 4
+    security.check_links([clean.get("location", ""), clean.get("description", "")],
+                         clean.get("attendees", before["attendees"]))          # check 5
+    after = _shape(get_backend().update_event(event_id, clean))
+    added = [a for a in after["attendees"] if a not in before["attendees"]]
+    security.after_change("update", after, new_guests=added)                  # checks 1 and 3
+    return {"before": before, "after": after}
 
 
-def calendar_create(event: dict) -> dict:
+def calendar_create(event: dict, *, check_schedule: bool = False) -> dict:
     """Create a new event (e.g. a makeup meeting). Google gives it a new id.
     Accepts the agreed flat shape: summary, start, end, attendees, description, location.
     Fields like id / organizer / responses are ignored, so a copy of another event works.
-    Returns {"before": None, "after": <created event dict, including its id>}"""
+    Returns {"before": None, "after": <created event dict, including its id>}
+    check_schedule=True (for the agent's own bookings): refuse a time that collides with
+    another meeting or leaves less than 15 minutes between them, and suggest a free time."""
     clean = _editable(event)
     if "start" not in clean or "end" not in clean:
         raise ValueError("a new event needs both a start and an end time")
     _check_order(clean["start"], clean["end"])
     clean.setdefault("summary", "(no title)")
     clean.setdefault("attendees", [])
-    created = get_backend().insert_event(clean)
-    return {"before": None, "after": _shape(created)}
+    if check_schedule:
+        security.check_schedule(clean["start"], clean["end"])                  # check 4
+    security.check_links([clean.get("location", ""), clean.get("description", "")],
+                         clean["attendees"])                                    # check 5
+    created = _shape(get_backend().insert_event(clean))
+    security.after_change("create", created)                                    # checks 1 and 2
+    return {"before": None, "after": created}

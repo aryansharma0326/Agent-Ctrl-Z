@@ -70,7 +70,7 @@ class PretendCalendar:
             first = int(pageToken or 0)
             page = items[first:first + self.PAGE]
             more = first + self.PAGE < len(items)
-            return {"items": copy.deepcopy(page),
+            return {"summary": OWNER, "items": copy.deepcopy(page),      # real Google names the calendar after the account
                     **({"nextPageToken": str(first + self.PAGE)} if more else {})}
         return _Call(run)
 
@@ -131,6 +131,8 @@ def google(monkeypatch, tmp_path):
     monkeypatch.setattr(google_api, "_gmail", lambda: gmail)
     monkeypatch.setenv("USE_REAL_GOOGLE", "1")
     monkeypatch.setenv("CTRLZ_OUTBOX", str(tmp_path / "outbox.db"))
+    monkeypatch.setenv("CTRLZ_CHECK_LINKS_ONLINE", "0")   # tests never go on the internet
+    monkeypatch.setattr(google_api, "_owner", None)
     return cal, gmail
 
 
@@ -186,13 +188,13 @@ def test_list_uses_the_window_skips_cancelled_and_reads_every_page(google):
     assert got == ["E0", "E2", "E3", "E4"]                     # 3 pages of 2, E1 cancelled
 
 
-def test_insert_gives_new_id_new_york_time_and_sends_no_google_emails(google):
+def test_insert_gives_new_id_new_york_time_and_google_emails_the_guests(google):
     cal, _ = google
     made = google_api.insert_event({"summary": "Makeup", "start": "2026-11-23T10:00",
                                     "end": "2026-11-23T10:30", "attendees": [OWNER]})
     raw = cal.events_by_id[made["id"]]
     assert raw["start"] == {"dateTime": "2026-11-23T10:00:00", "timeZone": "America/New_York"}
-    assert cal.send_updates == ["none"]
+    assert cal.send_updates == ["all"]
 
 
 def test_times_with_a_timezone_are_sent_as_they_are(google):
@@ -210,7 +212,7 @@ def test_update_changes_only_what_is_given_and_keeps_rsvps(google):
     after = google_api.update_event(e["id"], {"attendees": [OWNER, "aryan@gmail.com", "v@gmail.com"]})
     assert after["responses"] == {OWNER: "accepted", "aryan@gmail.com": "accepted",
                                   "v@gmail.com": "needsAction"}
-    assert after["summary"] == "Sync" and set(cal.send_updates) == {"none"}
+    assert after["summary"] == "Sync" and set(cal.send_updates) == {"all"}
 
 
 def test_update_of_cancelled_event_raises(google):
@@ -274,7 +276,7 @@ def test_clear_my_friday_and_undo_on_the_real_backend(google):
     r = restore_calendar(action)
     assert r.success and r.new_target_id is None
     assert ct.calendar_get(demo["id"])["summary"] == "CS 598 demo prep"
-    assert set(cal.send_updates) == {"none"}
+    assert set(cal.send_updates) == {"all"}
 
 
 def test_email_correction_on_the_real_backend_threads_with_the_original(google):
@@ -319,3 +321,18 @@ def test_whole_stack_sees_new_york_times_when_google_answers_in_utc(google, monk
     made = ct.calendar_create({"summary": "Demo", "start": "2026-11-23T15:00",
                                "end": "2026-11-23T16:00"})["after"]
     assert ct.calendar_get(made["id"])["start"] == "2026-11-23T15:00:00-05:00"
+
+
+# ---------- Google's own emails to guests (on by default, Nov 23) ----------
+def test_google_emails_can_be_switched_off_with_a_setting(google, monkeypatch):
+    cal, _ = google
+    monkeypatch.setenv("CTRLZ_GOOGLE_NOTIFY", "none")
+    made = google_api.insert_event({"start": "2026-11-23T10:00", "end": "2026-11-23T10:30"})
+    google_api.delete_event(made["id"])
+    google_api.restore_event(made["id"])
+    assert cal.send_updates == ["none", "none", "none"]
+
+
+def test_unknown_notify_setting_falls_back_to_emailing_everyone(monkeypatch):
+    monkeypatch.setenv("CTRLZ_GOOGLE_NOTIFY", "loudly")
+    assert google_api._notify() == "all"

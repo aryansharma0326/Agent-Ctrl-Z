@@ -13,8 +13,10 @@
 # - times without a timezone are New York time, and every time Google sends back
 #   is turned into New York time (-05:00), even if Google answers in UTC
 
-#Who gets told: Google sends NO emails for our changes (sendUpdates="none").
-#Our own receipts and "it's fixed" notes do the telling, so nobody gets two emails.
+#Who gets told: Google sends its normal emails to the guests for every change
+#("Invitation", "Updated invitation", "Canceled event"), so people hear about a cancel
+#or a restore the usual way. Turn them off with the setting CTRLZ_GOOGLE_NOTIFY=none
+#(then only our own receipts and "it's fixed" notes tell people).
 
 #Safety: on real Gmail we refuse to email the sample-data addresses (@test.com,
 #@example.com). Those are real domains owned by strangers.
@@ -24,6 +26,7 @@
 from __future__ import annotations
 
 import base64
+import os
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import make_msgid
@@ -33,8 +36,13 @@ from googleapiclient.errors import HttpError
 CALENDAR = "primary"
 TIMEZONE = "America/New_York"
 NEW_YORK = timezone(timedelta(hours=-5))
-NOTIFY = "none"
 SAMPLE_DOMAINS = ("test.com", "example.com")
+
+
+def _notify() -> str:
+    """Should Google email the guests about our changes? "all" (default), "externalOnly" or "none"."""
+    value = os.environ.get("CTRLZ_GOOGLE_NOTIFY", "all").strip()
+    return value if value in ("all", "externalOnly", "none") else "all"
 
 
 #The two Google connections (tests swap these for pretend ones)
@@ -118,6 +126,17 @@ def _to_google(fields: dict, current: dict | None = None) -> dict:
 
 #Seven functions for the calendar and email (same names as the fake calendar)
 
+#Who is logged in (the owner). Google names the main calendar after the account's email.
+_owner = None
+
+
+def owner_email() -> str:
+    global _owner
+    if _owner is None:
+        _owner = _calendar().events().list(calendarId=CALENDAR, maxResults=1).execute()["summary"]
+    return _owner
+
+
 #Getting event - None if it doesn't exist or was cancelled
 def get_event(event_id: str) -> dict | None:
     try:
@@ -150,7 +169,7 @@ def list_events(start: str | None = None, end: str | None = None) -> list[dict]:
 def insert_event(event: dict) -> dict:
     body = _to_google(event)
     body.setdefault("summary", "(no title)")
-    g = _calendar().events().insert(calendarId=CALENDAR, body=body, sendUpdates=NOTIFY).execute()
+    g = _calendar().events().insert(calendarId=CALENDAR, body=body, sendUpdates=_notify()).execute()
     return _flat(g)
 
 
@@ -160,7 +179,7 @@ def update_event(event_id: str, changes: dict) -> dict:
     if current.get("status") == "cancelled":
         raise KeyError(f"No live event {event_id!r}")
     g = _calendar().events().patch(calendarId=CALENDAR, eventId=event_id,
-                                   body=_to_google(changes, current), sendUpdates=NOTIFY).execute()
+                                   body=_to_google(changes, current), sendUpdates=_notify()).execute()
     return _flat(g)
 
 
@@ -168,7 +187,7 @@ def update_event(event_id: str, changes: dict) -> dict:
 def delete_event(event_id: str) -> None:
     try:
         _calendar().events().delete(calendarId=CALENDAR, eventId=event_id,
-                                    sendUpdates=NOTIFY).execute()
+                                    sendUpdates=_notify()).execute()
     except HttpError as err:
         if not _gone(err):
             raise
@@ -181,7 +200,7 @@ def restore_event(event_id: str) -> dict | None:
         if g.get("status") != "cancelled":
             return _flat(g)                    # already live
         g = _calendar().events().patch(calendarId=CALENDAR, eventId=event_id,
-                                       body={"status": "confirmed"}, sendUpdates=NOTIFY).execute()
+                                       body={"status": "confirmed"}, sendUpdates=_notify()).execute()
     except HttpError:
         return None                            # restore_calendar then makes an exact copy
     return _flat(g)

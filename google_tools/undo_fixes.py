@@ -11,7 +11,7 @@ if a restore can't be done, success=False and the router falls back to group rep
 """
 from datetime import datetime
 
-from google_tools import email_tools
+from google_tools import email_tools, security
 from google_tools.backend import get_backend
 from google_tools.calendar_tools import (EDITABLE, NEW_YORK, _read_time, calendar_cancel,
                                          calendar_create, calendar_get)
@@ -63,6 +63,7 @@ def _restore_cancelled(action: ActionRecord) -> UndoResult:
         fixes = _differences(calendar_get(event_id) or {}, before)
         if fixes:
             get_backend().update_event(event_id, fixes)
+        security.after_change("restore", calendar_get(event_id))      # counts as a change
         return _result(action, True, f"Put '{title}' back on the calendar ({_when(before)}), "
                                      "exactly as it was, with the same event id.",
                        notify=action.affected_people)
@@ -86,6 +87,7 @@ def _restore_updated(action: ActionRecord) -> UndoResult:
         return _result(action, True, f"'{title}' already matches how it was before the agent "
                                      "changed it, so nothing needed to change.")
     get_backend().update_event(event_id, fixes)
+    security.after_change("restore", calendar_get(event_id))          # counts as a change
     changed = ", ".join(fixes)
     return _result(action, True, f"Put '{title}' back as it was ({_when(before)}). "
                                  f"Changed back: {changed}.",

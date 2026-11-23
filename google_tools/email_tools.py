@@ -93,6 +93,8 @@ def email_send(to: list[str], subject: str, body: str, hold_seconds: int | None 
     Returns {"before": None, "after": <email>}, where <email> has id, status
     ("held" or "sent"), to, subject, body, and send_at for held emails."""
     to = _recipients(to)
+    from google_tools import security   # here, to avoid a circular import
+    security.check_links([subject, body], to)    # every link must really work for the recipients
     hold = hold_seconds_default() if hold_seconds is None else int(hold_seconds)
     if hold <= 0:
         message = get_backend().send_email(to, subject, body)
