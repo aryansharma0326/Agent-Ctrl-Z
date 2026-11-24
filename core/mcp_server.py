@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import inspect
 import sqlite3
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -35,7 +36,8 @@ from mcp.server.fastmcp import FastMCP
 
 from core.action_log import log_action
 from core.flag_triage import PROBLEMS as PROBLEM_KINDS, triage_all
-from core.receipts import deliver_receipts, describe
+from core.receipts import (can_track_emails, deliver_receipts, describe, send_due_receipts,
+                           wait_for_send)
 from core.session_rollback import plan_rollback, run_rollback
 from core.signing import matches, sign
 from core.undo_router import plan_undo, route_undo
@@ -194,10 +196,34 @@ def send_email(to: list[str], subject: str, body: str, instruction: str) -> dict
     if not sent or not sent.get("id"):
         return _fail("The email could not be sent.")
     rec = log_action(get_conn(), "email.send", sent["id"], result, instruction)
-    if sent.get("status") == "held":
+    status = sent.get("status", "sent")
+    if status in ("held", "awaiting_approval") and can_track_emails():
+        return _not_sent_yet(rec, sent, subject, len(to))
+    if status == "held":
         return _done(rec, f"Email '{subject}' to {len(to)} people is held briefly and goes "
                           f"out automatically unless it's undone first.")
     return _done(rec, f"Email '{subject}' sent to {len(to)} people.")
+
+
+def _not_sent_yet(rec, email: dict, subject: str, people: int) -> dict[str, Any]:
+    """The email is logged but hasn't gone out. Say so truthfully, and hold its
+    receipts until it really is sent (dropped if it never is)."""
+    wait_for_send(get_conn(), rec.action_id)
+    blast = email.get("blast_radius") or {}
+    if email.get("status") == "awaiting_approval":
+        why = "; ".join(blast.get("reasons", [])) or "it looks risky"
+        message = (f"Email '{subject}' to {people} people has NOT been sent. It has a high "
+                   f"blast radius ({why}), so it waits for the owner's approval and expires "
+                   f"unsent otherwise. Tell the owner; they can approve it on their computer "
+                   f"with: python -m google_tools.approvals approve {email['id']}")
+    else:
+        wait = f" for about {blast['hold_seconds']} seconds" if blast.get("hold_seconds") else ""
+        message = (f"Email '{subject}' to {people} people is held briefly{wait} and goes out "
+                   f"automatically unless it's undone first.")
+    return {"ok": True, "action_id": rec.action_id, "message": message,
+            "affected_people": rec.affected_people, "email_status": email.get("status"),
+            "receipts_sent": 0,
+            "receipts": "sent automatically once the email has actually gone out"}
 
 
 # ---------- undo tools: find, preview, then undo ----------
@@ -372,6 +398,26 @@ def start_email_sender() -> bool:
     return True
 
 
+def start_receipt_sender(every_seconds: float = 5) -> threading.Thread | None:
+    """Receipts for held emails go out once the email does, so check now and then.
+    Uses its own database connection (SQLite connections stay in one thread)."""
+    if not can_track_emails():
+        return None
+
+    def loop():
+        conn = db.connect()
+        while True:
+            try:
+                send_due_receipts(conn)
+            except Exception:
+                pass
+            time.sleep(every_seconds)
+    thread = threading.Thread(target=loop, name="receipt-sender", daemon=True)
+    thread.start()
+    return thread
+
+
 if __name__ == "__main__":
     start_email_sender()
+    start_receipt_sender()
     mcp.run()

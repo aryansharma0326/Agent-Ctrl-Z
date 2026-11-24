@@ -330,3 +330,66 @@ def test_claude_is_told_loudly_when_receipts_fail(server, monkeypatch):
     assert set(out["receipts_not_sent"]) == {"aryan@test.com", "visista@test.com"}
     assert "Warning: receipts could not be sent to 2 people" in out["message"]
     assert "Tell the owner" in out["message"] and "localhost" in out["message"]
+
+
+# ---------- emails that haven't gone out yet: honest message, receipts wait ----------
+
+@pytest.fixture
+def outbox(server, monkeypatch):
+    """A pretend outbox like Visista's: .status[email_id] is what email_status says."""
+    from core import receipts
+
+    class Outbox:
+        status, receipts_to = {}, []
+    o = Outbox()
+    o.status, o.receipts_to = {}, []
+    monkeypatch.setattr(mcp_server.email_tools, "email_status", lambda i: o.status.get(i),
+                        raising=False)
+    monkeypatch.setattr(receipts, "_send_now", lambda to, s, b: o.receipts_to.extend(to))
+
+    def send(status, blast=None):
+        def email_send(to, subject, body):
+            o.status["msg_1"] = status
+            return {"before": None, "after": {"id": "msg_1", "status": status, "to": to,
+                                              "subject": subject, "blast_radius": blast}}
+        monkeypatch.setattr(mcp_server.email_tools, "email_send", email_send)
+    o.send = send
+    return o
+
+
+def test_high_blast_radius_email_is_not_called_sent_and_has_no_receipts_yet(server, outbox):
+    outbox.send("awaiting_approval", {"score": 9, "tier": "high",
+                                      "reasons": ["30 recipients not in your contacts (+6)"]})
+    out = mcp_server.send_email(["a@x.com", "b@x.com"], "Grades", "x", "Email the class")
+    assert out["ok"] and "has NOT been sent" in out["message"]
+    assert "30 recipients not in your contacts" in out["message"]
+    assert "python -m google_tools.approvals approve msg_1" in out["message"]
+    assert out["receipts_sent"] == 0 and outbox.receipts_to == []
+    assert db.get_action(server, out["action_id"]).tool == "email.send"     # still logged
+
+
+def test_receipts_go_out_once_the_email_is_really_sent(server, outbox):
+    from core import receipts
+    outbox.send("held", {"tier": "low", "hold_seconds": 10})
+    out = mcp_server.send_email(["aryan@test.com"], "Notes", "x", "Send Aryan the notes")
+    assert "held briefly for about 10 seconds" in out["message"] and "undone" in out["message"]
+    assert receipts.send_due_receipts(server) == {"sent": [], "dropped": []}   # still held
+    outbox.status["msg_1"] = "sent"
+    assert receipts.send_due_receipts(server)["sent"] == [out["action_id"]]
+    assert outbox.receipts_to == ["aryan@test.com"]
+    assert receipts.send_due_receipts(server)["sent"] == []                    # only once
+
+
+@pytest.mark.parametrize("ending", ["stopped", "expired"])
+def test_emails_that_never_go_out_never_get_receipts(server, outbox, ending):
+    from core import receipts
+    outbox.send("awaiting_approval", {"reasons": ["mentions grades (+2)"]})
+    out = mcp_server.send_email(["aryan@test.com"], "Grades", "x", "Email Aryan")
+    outbox.status["msg_1"] = ending                 # owner denied, undo stopped it, or expired
+    assert receipts.send_due_receipts(server)["dropped"] == [out["action_id"]]
+    assert outbox.receipts_to == []
+
+
+def test_receipt_sender_only_starts_when_emails_can_be_tracked(monkeypatch):
+    monkeypatch.delattr(mcp_server.email_tools, "email_status", raising=False)
+    assert mcp_server.start_receipt_sender() is None

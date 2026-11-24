@@ -283,3 +283,57 @@ def send_rollback_notices(fixes: list[tuple[ActionRecord, UndoResult]]) -> list[
         except Exception:
             continue
     return sent
+
+
+# ---------- receipts for emails that haven't gone out yet ----------
+# The agent's emails can be held for a few seconds, or wait for the owner's approval
+# when they look risky (Visista's blast radius). A receipt saying "the AI emailed you"
+# must not arrive before the email, or at all if the owner denies it. So receipts for
+# those emails wait here until the email is really sent.
+
+WAITING_TABLE = """
+CREATE TABLE IF NOT EXISTS waiting_receipts (
+    action_id  TEXT PRIMARY KEY,
+    since      TEXT NOT NULL
+);
+"""
+NEVER_SENT = ("stopped", "expired")
+
+
+def can_track_emails() -> bool:
+    """True if email_tools can say whether a held email has gone out yet."""
+    return callable(getattr(email_tools, "email_status", None))
+
+
+def wait_for_send(conn, action_id: str) -> None:
+    conn.executescript(WAITING_TABLE)
+    conn.execute("INSERT OR REPLACE INTO waiting_receipts VALUES (?, ?)",
+                 (action_id, datetime.now().astimezone().isoformat(timespec="seconds")))
+    conn.commit()
+
+
+def waiting(conn) -> list[str]:
+    conn.executescript(WAITING_TABLE)
+    return [r[0] for r in conn.execute("SELECT action_id FROM waiting_receipts ORDER BY since")]
+
+
+def send_due_receipts(conn) -> dict[str, list[str]]:
+    """Send receipts for waiting emails that have now gone out; drop the ones that never
+    will (stopped by an undo, denied or expired). Never raises."""
+    done: dict[str, list[str]] = {"sent": [], "dropped": []}
+    for action_id in waiting(conn):
+        try:
+            action = db.get_action(conn, action_id)
+            status = email_tools.email_status(action.target_id) if action else None
+        except Exception:
+            continue                       # try again next time
+        if status == "sent":
+            deliver_receipts(action)
+            done["sent"].append(action_id)
+        elif action is None or status is None or status in NEVER_SENT:
+            done["dropped"].append(action_id)
+        else:
+            continue                       # still held or waiting for approval
+        conn.execute("DELETE FROM waiting_receipts WHERE action_id = ?", (action_id,))
+        conn.commit()
+    return done
