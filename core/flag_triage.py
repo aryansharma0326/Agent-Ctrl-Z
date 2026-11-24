@@ -25,12 +25,16 @@ as untrusted data everywhere:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 
-from shared.models import Flag, now_iso
+from shared import db
+from shared.models import ActionRecord, Flag, now_iso
 
 from core import llm
-from core.receipts import clean_flag_text, looks_suspicious
+from core.receipts import clean_flag_text, describe, looks_suspicious
+from core.undo_router import DEFAULT_TZ, plan_undo
 
 # What a flag can mean. Everything except "fine" and "unclear" is a real problem.
 LABELS: dict[str, str] = {
@@ -211,3 +215,132 @@ def label_for(conn, flag: Flag, what_happened: str = "",
                  (flag.flag_id, found.label, found.summary, found.source, now_iso()))
     conn.commit()
     return found
+
+
+# ---------- one decision per action ----------
+
+SHORT = {"conflict": "clashes with their plans", "wrong_time": "bad time",
+         "wrong_people": "wrong people", "wrong_details": "wrong details",
+         "bring_back": "still needed"}
+URGENT_WITHIN = timedelta(hours=24)
+SOON_WITHIN = timedelta(hours=72)
+ORDER = {"undo": 0, "look": 1, "keep": 2}
+
+
+@dataclass
+class TriagedFlag:
+    flag_id: str
+    flagged_by: str
+    label: str
+    summary: str
+    source: str
+    timestamp: str
+
+
+@dataclass
+class ActionTriage:
+    """Everything the owner needs to decide about one flagged action."""
+    action_id: str
+    what_happened: str
+    status: str
+    affected: list[str]
+    flags: list[TriagedFlag]          # newest flag per person
+    counts: dict[str, int]            # label -> how many people
+    reporters: list[str]              # people who reported a real problem
+    recommendation: str               # "undo" | "keep" | "look"
+    reason: str                       # plain English, safe to show
+    plan: dict | None = None          # the undo router's dry-run plan, if undo
+    urgency: float = 0.0              # higher = deal with it first
+    suspicious: int = 0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _starts_at(action: ActionRecord) -> datetime | None:
+    for copy in (action.before, action.after):
+        try:
+            t = datetime.fromisoformat((copy or {})["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        return t if t.tzinfo else t.replace(tzinfo=DEFAULT_TZ)
+    return None
+
+
+def _time_pressure(action: ActionRecord, now: datetime) -> float:
+    """Extra urgency if the event is coming up soon (nothing for emails or past events)."""
+    start = _starts_at(action)
+    if start is None or start < now:
+        return 0.0
+    if start - now <= URGENT_WITHIN:
+        return 1.0
+    if start - now <= SOON_WITHIN:
+        return 0.5
+    return 0.0
+
+
+def _problem_list(flags: list[TriagedFlag]) -> str:
+    counts = Counter(f.label for f in flags if f.label in PROBLEMS)
+    return ", ".join(f"{SHORT[label]} ({n})" for label, n in counts.most_common())
+
+
+def triage_action(conn, action_id: str, use_model: bool | None = None,
+                  now: datetime | None = None) -> ActionTriage | None:
+    """Read every flag on one action and recommend what to do. Changes nothing
+    except remembering flag labels. Returns None if the action doesn't exist."""
+    action = db.get_action(conn, action_id)
+    if action is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    what = describe(action)
+
+    newest: dict[str, TriagedFlag] = {}           # a person's latest flag replaces earlier ones
+    for f in db.list_flags(conn):
+        if f.action_id != action_id:
+            continue
+        found = label_for(conn, f, what, use_model)
+        newest[f.flagged_by] = TriagedFlag(f.flag_id, f.flagged_by, found.label,
+                                           found.summary, found.source, f.timestamp)
+    flags = sorted(newest.values(), key=lambda f: f.timestamp)
+    reporters = [f.flagged_by for f in flags if f.label in PROBLEMS]
+    suspicious = sum(f.label == SUSPICIOUS for f in flags)
+    counts = dict(Counter(f.label for f in flags))
+    people = len(action.affected_people) or 1
+
+    plan = None
+    if reporters:
+        undo_plan = plan_undo(conn, action_id)
+        told = f"{len(reporters)} of {people} affected people reported a problem: " \
+               f"{_problem_list(flags)}."
+        if undo_plan.can_undo:
+            recommendation, reason, plan = "undo", told, undo_plan.to_dict()
+        else:
+            recommendation = "look"
+            reason = f"{told} It can't be undone automatically: {undo_plan.explanation}"
+    elif flags and all(f.label == "fine" for f in flags):
+        recommendation, reason = "keep", "Everyone who flagged it says it's fine, so it can stay."
+    else:
+        recommendation = "look"
+        reason = "The flags don't say clearly what's wrong, so read them before deciding."
+    if suspicious:
+        reason += (f" {suspicious} flag{'s' if suspicious > 1 else ''} looked like an attempt "
+                   f"to give the AI orders; no AI read {'them' if suspicious > 1 else 'it'}.")
+
+    urgency = len(reporters) / people + _time_pressure(action, now) if reporters else 0.0
+    return ActionTriage(action_id, what, action.status, action.affected_people, flags, counts,
+                        reporters, recommendation, reason, plan, round(urgency, 2), suspicious)
+
+
+def triage_all(conn, use_model: bool | None = None, now: datetime | None = None,
+               include_handled: bool = False) -> list[ActionTriage]:
+    """Every action waiting on the owner (status "flagged"), most urgent first:
+    undo recommendations first, then the ones to look at, then the ones to keep."""
+    wanted = ("flagged", "done", "undone", "undo_failed") if include_handled else ("flagged",)
+    flagged_ids = {f.action_id for f in db.list_flags(conn)}
+    out = []
+    for a in db.list_actions(conn):
+        if a.action_id in flagged_ids and a.status in wanted:
+            found = triage_action(conn, a.action_id, use_model, now)
+            if found:
+                out.append(found)
+    return sorted(out, key=lambda x: (ORDER[x.recommendation], -x.urgency))
