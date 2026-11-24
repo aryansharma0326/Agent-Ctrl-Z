@@ -27,6 +27,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from shared.models import Flag, now_iso
+
 from core import llm
 from core.receipts import clean_flag_text, looks_suspicious
 
@@ -170,3 +172,42 @@ def classify_flag(text: object, what_happened: str = "",
             return found
     label = rules_label(text)
     return FlagLabel(label, _plain(label), "rules")
+
+
+# ---------- remember labels (each flag is read once) ----------
+# Kept in its own table, so the shared tables everyone agreed on don't change.
+
+TABLE = """
+CREATE TABLE IF NOT EXISTS flag_triage (
+    flag_id    TEXT PRIMARY KEY,
+    label      TEXT NOT NULL,
+    summary    TEXT NOT NULL,
+    source     TEXT NOT NULL,
+    timestamp  TEXT NOT NULL
+);
+"""
+
+
+def _ensure_table(conn) -> None:
+    conn.executescript(TABLE)
+
+
+def saved_label(conn, flag_id: str) -> FlagLabel | None:
+    _ensure_table(conn)
+    row = conn.execute("SELECT label, summary, source FROM flag_triage WHERE flag_id=?",
+                       (flag_id,)).fetchone()
+    return FlagLabel(row[0], row[1], row[2]) if row else None
+
+
+def label_for(conn, flag: Flag, what_happened: str = "",
+              use_model: bool | None = None) -> FlagLabel:
+    """The label for a saved flag: read it once, then reuse the saved answer, so the
+    owner sees the same label every time and the model isn't asked again."""
+    found = saved_label(conn, flag.flag_id)
+    if found:
+        return found
+    found = classify_flag(flag.reason_text, what_happened, use_model)
+    conn.execute("INSERT OR REPLACE INTO flag_triage VALUES (?,?,?,?,?)",
+                 (flag.flag_id, found.label, found.summary, found.source, now_iso()))
+    conn.commit()
+    return found

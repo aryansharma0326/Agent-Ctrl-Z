@@ -110,3 +110,18 @@ def test_model_is_only_used_when_a_key_is_set(model, monkeypatch):
     assert t.classify_flag("this clashes with my exam").source == "rules"
     monkeypatch.setenv("GROQ_API_KEY", "k")
     assert t.classify_flag("this clashes with my exam").source == "model"
+
+
+# ---------- saved labels ----------
+
+def test_each_flag_is_labelled_once_and_reused(tmp_path, model):
+    from shared import db
+    from shared.models import Flag
+    conn = db.connect(tmp_path / "t.db")
+    flag = Flag(action_id="act_1", flagged_by="aryan@test.com", reason_text="clashes with lab")
+    model.reply = {"label": "conflict", "summary": "Has lab then."}
+    first = t.label_for(conn, flag, use_model=True)
+    model.reply = {"label": "fine", "summary": "changed its mind"}
+    second = t.label_for(conn, flag, use_model=True)
+    assert first == second == t.FlagLabel("conflict", "Has lab then.", "model")
+    assert len(model.prompts) == 1
