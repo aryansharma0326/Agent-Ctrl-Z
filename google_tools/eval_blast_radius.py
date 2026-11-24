@@ -34,6 +34,7 @@ from pathlib import Path
 from google_tools import blast_radius
 
 SCENARIOS = Path(__file__).resolve().parent / "blast_radius_scenarios.json"
+LABELS_DIR = Path(__file__).resolve().parent / "labels"     # one file per teammate (label_emails.py)
 NOTICE_TIMES = (5, 15, 30, 60, 120, 300)
 LABEL_TO_TIER = {"now": "low", "act now": "low", "low": "low",
                  "hold": "medium", "hold briefly": "medium", "medium": "medium",
@@ -45,9 +46,21 @@ def load(path: Path = SCENARIOS) -> dict:
     return json.loads(path.read_text())
 
 
+def file_labels(labels_dir: Path | None = None) -> dict[str, dict[str, str]]:
+    """{scenario id: {teammate: label}} from labels/<teammate>.json."""
+    labels_dir = labels_dir or LABELS_DIR
+    found: dict[str, dict[str, str]] = {}
+    for path in sorted(labels_dir.glob("*.json")) if labels_dir.exists() else []:
+        for sid, label in json.loads(path.read_text()).items():
+            found.setdefault(sid, {})[path.stem] = label
+    return found
+
+
 def score_all(data: dict, **options) -> list[dict]:
     rows = []
+    from_files = file_labels()
     for s in data["scenarios"]:
+        s = {**s, "labels": {**s.get("labels", {}), **from_files.get(s["id"], {})}}
         r = blast_radius.score_email(s["to"], s["subject"], s["body"], owner=data["owner"],
                                      known=set(data["known_contacts"]),
                                      recent_emails=s.get("recent_agent_emails", 0), **options)
@@ -163,8 +176,8 @@ def main() -> None:
     print("## 2. Team labels\n")
     report = label_report(rows)
     if not report:
-        print("No labels yet. Each teammate fills in 'now' / 'hold' / 'ask' for every scenario in "
-              f"{args.scenarios.name}, without looking at the scores, then run this again.\n")
+        print("No labels yet. Each teammate runs:  python -m google_tools.label_emails --name <name>\n"
+              "and sends Visista their google_tools/labels/<name>.json. Then run this again.\n")
     else:
         kappa = report["kappa"]
         print(f"Labeled scenarios: {report['labeled']}. Agreement (Fleiss' kappa): "
