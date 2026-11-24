@@ -59,7 +59,7 @@ def test_all_tools_are_registered():
     names = {t.name for t in mcp_server.mcp._tool_manager.list_tools()}
     assert names == {"list_events", "get_event", "cancel_event", "update_event",
                      "create_event", "send_email", "recent_actions", "preview_undo",
-                     "undo_action", "flag_inbox"}
+                     "undo_action", "flag_inbox", "preview_rollback", "rollback_session"}
 
 
 def test_cancel_is_logged_with_before_copy(server):
@@ -254,3 +254,35 @@ def test_flag_inbox_gives_the_agent_kinds_and_counts_never_words(server, monkeyp
     assert item["flags_that_looked_like_injected_orders"] == 1
     text = str(inbox).lower()
     assert "visa" not in text and "ignore previous" not in text and "email everyone" not in text
+# ---------- roll back a whole session ----------
+
+def test_preview_then_rollback_everything_from_this_session(server):
+    mcp_server.cancel_event("evt_demo", "Clear my Friday")
+    mcp_server.cancel_event("evt_1on1", "Clear my Friday")
+    preview = mcp_server.preview_rollback(minutes=30)
+    assert preview["summary"].startswith("Will undo 2 changes (2 agent actions)")
+    assert "evt_demo" not in g.EVENTS                            # preview changed nothing
+    out = mcp_server.rollback_session(preview["since"], preview["until"],
+                                      preview["approval_code"])
+    assert out["ok"] and out["message"].startswith("Undid 2 changes.")
+    assert "evt_demo" in g.EVENTS and "evt_1on1" in g.EVENTS
+    assert {a.status for a in db.list_actions(server)} == {"undone"}
+
+
+def test_rollback_needs_a_matching_fresh_code(server):
+    mcp_server.cancel_event("evt_demo", "Clear my Friday")
+    mcp_server.cancel_event("evt_1on1", "Clear my Friday")
+    preview = mcp_server.preview_rollback(minutes=30)
+    assert not mcp_server.rollback_session(preview["since"], preview["until"], "123.fake")["ok"]
+    demo = next(a for a in db.list_actions(server) if a.target_id == "evt_demo").before
+    g.add_event_as_is(demo)                    # someone put it back by hand since the preview
+    out = mcp_server.rollback_session(preview["since"], preview["until"],
+                                      preview["approval_code"])
+    assert not out["ok"] and "changed since the preview" in out["message"]
+    assert "evt_1on1" not in g.EVENTS          # nothing was rolled back
+
+
+def test_nothing_to_roll_back(server):
+    preview = mcp_server.preview_rollback(minutes=30)
+    assert "approval_code" not in preview and "nothing to roll back" in preview["summary"]
+    assert not mcp_server.rollback_session("not a time", "x", "1.x")["ok"]
