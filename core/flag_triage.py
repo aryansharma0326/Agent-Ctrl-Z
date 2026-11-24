@@ -51,6 +51,26 @@ PROBLEMS = ("conflict", "wrong_time", "wrong_people", "wrong_details", "bring_ba
 NOT_PROBLEMS = ("fine", "unclear", SUSPICIOUS)
 
 
+# Disguised orders the basic check in receipts.py misses. Each is a known
+# prompt-injection trick, not a phrase from one example:
+INJECTION_TRICKS = re.compile("|".join([
+    r"(^|\n)\s*(assistant|system|developer|ai|claude|chatgpt|gpt)\s*:",   # fake chat roles
+    r"\b(owner|admin|varuni|user|boss|manager) (has |had )?(already )?"
+    r"(approved|authori[sz]ed|okayed|said you (can|may|should))",       # fake permission
+    r"\b(send|forward|email|share|give) (me|us) (the |all |every |their |a )?(full )?"
+    r"(list|attendee|contact|email address|address|schedule|calendar|password|credential|login)",
+                                                                               # data out
+    r"\b(undo|cancel|delete|remove|clear) (everything|every (meeting|event|email)|"
+    r"all (the )?(meetings|events|emails|invites))",                          # mass actions
+    r"\b(new|updated|real) instructions?\b", r"\bact as\b",
+]), re.IGNORECASE)
+
+
+def looks_injected(text: str) -> bool:
+    """True if a flag reads like orders for an AI, obvious or disguised."""
+    return looks_suspicious(text) or bool(INJECTION_TRICKS.search(text or ""))
+
+
 @dataclass
 class FlagLabel:
     label: str      # one of LABELS, or "suspicious"
@@ -154,7 +174,7 @@ def model_label(text: str, what_happened: str = "") -> FlagLabel | None:
     if label not in LABELS:                    # only labels from our list are accepted
         return None
     summary = clean_flag_text(answer.get("summary", ""))[:MAX_SUMMARY_CHARS]
-    if not summary or looks_suspicious(summary):
+    if not summary or looks_injected(summary):
         summary = _plain(label)
     return FlagLabel(label, summary, "model")
 
@@ -164,7 +184,7 @@ def classify_flag(text: object, what_happened: str = "",
     """Label one flag. Order: guard -> model (if available) -> rules.
     use_model=None means "use the model if a key is set"."""
     text = clean_flag_text(text)
-    if looks_suspicious(text):
+    if looks_injected(text):
         return FlagLabel(SUSPICIOUS, "Looks like an attempt to give the AI orders, so no AI "
                                      "read it. Read it yourself if needed.", "guard")
     if not text:

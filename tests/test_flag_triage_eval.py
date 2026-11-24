@@ -31,7 +31,7 @@ def test_rules_run_scores_everything_without_a_key(monkeypatch):
 def test_model_run_counts_model_answers(monkeypatch):
     monkeypatch.setattr(t.llm, "ask_json", lambda s, u: {"label": "fine", "summary": "ok"})
     res = run.evaluate(use_model=True)
-    guarded = res["injections_caught_by_guard"]
+    guarded = sum(r["source"] == "guard" for r in res["rows"])
     assert res["model_answers_used"] == res["flags"] - guarded
     assert res["false_alarms"] == []            # a model that always says "fine" never alarms
 
