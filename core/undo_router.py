@@ -37,6 +37,8 @@ from shared.models import ActionRecord, UndoResult
 
 DEFAULT_TZ = timezone(timedelta(hours=-5))   # times without a timezone are read as -05:00
 COMPARED_FIELDS = ("summary", "start", "end", "attendees", "description", "location")
+ALREADY_BACK = "the event is already back on the calendar"
+EDITED_AFTER = "someone edited the event after the agent did"
 
 
 # ---------- small helpers ----------
@@ -62,22 +64,27 @@ def _fail(action_id: str, details: str, fix_type: str = "exact_restore") -> Undo
 
 # ---------- conflict check ----------
 
+def edited_after_agent(current: dict | None, agent_left: dict | None) -> bool:
+    """True if the event now differs from how the agent left it (a person changed it)."""
+    if not current or not agent_left:
+        return False
+    if current.get("updated") and agent_left.get("updated"):
+        return current["updated"] != agent_left["updated"]
+    # every field, with blank and missing treated alike, so a person ADDING a location
+    # or description counts as an edit too
+    return any((current.get(f) or None) != (agent_left.get(f) or None) for f in COMPARED_FIELDS)
+
+
 def find_conflict(action: ActionRecord) -> str | None:
     """Why a plain restore would be unsafe, or None if it's safe."""
     before = action.before or {}
     current = calendar_tools.calendar_get(action.target_id)
 
     if action.tool == "calendar.cancel_event" and current:
-        return "the event is already back on the calendar"
+        return ALREADY_BACK
 
-    if action.tool == "calendar.update_event" and current and action.after:
-        if current.get("updated") and action.after.get("updated"):
-            edited = current["updated"] != action.after["updated"]
-        else:
-            edited = any(current.get(f) != action.after.get(f) for f in COMPARED_FIELDS
-                         if f in action.after)
-        if edited:
-            return "someone edited the event after the agent did"
+    if action.tool == "calendar.update_event" and edited_after_agent(current, action.after):
+        return EDITED_AFTER
 
     if not before.get("start") or not before.get("end"):
         return None

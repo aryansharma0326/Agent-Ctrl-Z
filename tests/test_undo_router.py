@@ -216,3 +216,16 @@ def test_run_undo_never_raises(env):
                        after=None, affected_people=[], instruction="x")
     out = r.run_undo(rec, r.plan_for(rec), [])
     assert not out.success and "Google is down" in out.details
+
+
+def test_a_person_adding_a_field_counts_as_an_edit(env):
+    moved = {**DEMO, "start": "2026-11-20T17:00:00-05:00", "end": "2026-11-20T18:00:00-05:00"}
+    env.calendar["evt_demo"] = {**moved, "location": "CDS 701"}      # agent's copy had none
+    rec = log(env.conn, "calendar.update_event", before=DEMO, after=moved)
+    assert r.plan_undo(env.conn, rec.action_id).conflict == r.EDITED_AFTER
+
+
+def test_blank_and_missing_fields_are_not_an_edit():
+    assert not r.edited_after_agent({**DEMO, "location": ""}, DEMO)
+    assert r.edited_after_agent({**DEMO, "location": "CDS 701"}, DEMO)
+    assert not r.edited_after_agent(None, DEMO)
