@@ -20,9 +20,12 @@ and switch to group repair for no reason. So rollback works on NET changes:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
+from core.receipts import describe
+from core.undo_router import (ALREADY_BACK, EDITED_AFTER, UndoPlan, calendar_tools,
+                               edited_after_agent, plan_for)
 from shared import db
 from shared.models import ActionRecord
 
@@ -101,3 +104,104 @@ def net_changes(actions: list[ActionRecord]) -> list[NetChange]:
         groups.setdefault(key, []).append(a)
     changes = [net_change(group) for group in groups.values()]
     return sorted(changes, key=lambda c: _when(c.last_time), reverse=True)
+
+
+# ---------- the plan (dry run: decides, changes nothing) ----------
+
+@dataclass
+class RollbackStep:
+    """What rollback will do about one event or email."""
+    target_id: str
+    action_ids: list[str]
+    what_happened: str              # every agent action on it, in order
+    strategy: str                   # the router's strategy, or "nothing_to_undo"
+    explanation: str                # plain English, safe to show the owner
+    will_notify: list[str]
+    will_run: bool
+    skip_reason: str | None = None
+    record: ActionRecord | None = field(default=None, repr=False)
+    plan: UndoPlan | None = field(default=None, repr=False)
+
+    def to_dict(self) -> dict:
+        return {k: v for k, v in asdict(self).items() if k not in ("record", "plan")}
+
+
+@dataclass
+class RollbackPlan:
+    since: str
+    until: str
+    steps: list[RollbackStep]       # newest first: the order they will run in
+
+    @property
+    def to_run(self) -> list[RollbackStep]:
+        return [s for s in self.steps if s.will_run]
+
+    @property
+    def skipped(self) -> list[RollbackStep]:
+        return [s for s in self.steps if not s.will_run]
+
+    @property
+    def people(self) -> list[str]:
+        return _union([s.will_notify for s in self.to_run])
+
+    def fingerprint(self) -> str:
+        """Changes whenever what the rollback would do changes (used for approval codes)."""
+        return f"{self.since}|{self.until}|" + "|".join(
+            f"{s.target_id}:{','.join(s.action_ids)}:{s.strategy}:{s.will_run}"
+            for s in self.steps)
+
+    def summary(self) -> str:
+        actions = sum(len(s.action_ids) for s in self.to_run)
+        text = (f"Will undo {len(self.to_run)} change{'s' if len(self.to_run) != 1 else ''} "
+                f"({actions} agent action{'s' if actions != 1 else ''})")
+        if self.skipped:
+            text += f", skip {len(self.skipped)}"
+        return text + f" and tell {len(self.people)} people it's fixed."
+
+    def to_dict(self) -> dict:
+        return {"since": self.since, "until": self.until, "summary": self.summary(),
+                "steps": [s.to_dict() for s in self.steps]}
+
+
+def _skip_reason(change: NetChange, plan: UndoPlan) -> str | None:
+    """Why this change must be left alone, or None if it's safe to undo."""
+    if not plan.can_undo:
+        return plan.explanation
+    if plan.conflict == ALREADY_BACK:
+        return "Someone already put it back, so there is nothing to undo."
+    if plan.conflict == EDITED_AFTER:
+        return ("A person edited it after the agent, so rolling back would overwrite "
+                "their change. Undo it by hand if you still want to.")
+    record = change.record
+    if record.tool == CREATE:
+        current = calendar_tools.calendar_get(record.target_id)
+        if edited_after_agent(current, record.after):
+            return ("A person edited the event the agent created, so removing it could "
+                    "throw away their change. Remove it by hand if you still want to.")
+    return None
+
+
+def plan_rollback(conn, since: str, until: str | None = None) -> RollbackPlan:
+    """Decide what rolling back [since, until] would do, without doing it. Never raises."""
+    until = until or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    steps = []
+    for change in net_changes(actions_between(conn, since, until)):
+        what = " then ".join(describe(a) for a in change.actions)
+        if change.record is None:
+            steps.append(RollbackStep(
+                change.target_id, change.action_ids, what, NOTHING,
+                "The agent created this and later removed it itself, so there's nothing "
+                "to put back.", [], True))
+            continue
+        try:
+            plan = plan_for(change.record)
+            reason = _skip_reason(change, plan)
+        except Exception as exc:
+            plan, reason = None, f"Couldn't check it safely ({exc}), so it was left alone."
+        steps.append(RollbackStep(
+            change.target_id, change.action_ids, what,
+            plan.strategy if plan else "none",
+            reason or plan.explanation,
+            [] if reason else list(plan.will_notify),
+            reason is None, reason, change.record, plan))
+    return RollbackPlan(since, until, steps)

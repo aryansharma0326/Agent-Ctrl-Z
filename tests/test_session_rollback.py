@@ -90,3 +90,90 @@ def test_each_email_stays_separate_and_newest_change_comes_first(conn):
     e2 = act(conn, "email.send", "msg_2", None, {"id": "msg_2"}, 3)
     order = [c.action_ids for c in s.net_changes([e1, c1, e2])]
     assert order == [[e2.action_id], [c1.action_id], [e1.action_id]]
+
+
+# ---------- planning (dry run) ----------
+
+from core import undo_router as r
+from shared.models import UndoResult
+
+
+@pytest.fixture
+def cal(conn, monkeypatch):
+    """A pretend calendar and fixers. .calendar is what Google has now; .calls records fixers."""
+    class Env:
+        calendar, calls = {}, []
+    e = Env()
+    e.calendar, e.calls, e.conn = {}, [], conn
+
+    def fixer(name):
+        def run(action, *args):
+            e.calls.append((name, action.target_id))
+            return UndoResult(action.action_id, name, True, f"{name} on {action.target_id}",
+                              list(action.affected_people))
+        return run
+
+    monkeypatch.setattr(r.calendar_tools, "calendar_get", lambda i: e.calendar.get(i))
+    monkeypatch.setattr(r.calendar_tools, "calendar_list", lambda a, b: list(e.calendar.values()))
+    monkeypatch.setattr(r.calendar_tools, "calendar_cancel",
+                        lambda i: {"before": e.calendar.pop(i, None), "after": None})
+    monkeypatch.setattr(r, "restore_calendar", fixer("exact_restore"))
+    monkeypatch.setattr(r, "undo_email", fixer("email_correction"))
+    monkeypatch.setattr(r, "group_repair", fixer("group_repair"))
+    monkeypatch.setattr(r, "send_fixed_notices", lambda a, res: [])
+    return e
+
+
+def test_plan_changes_nothing_and_explains_each_step(cal):
+    act(cal.conn, s.CANCEL, "evt_demo", DEMO, None, 5)
+    act(cal.conn, "email.send", "msg_1", None, {"id": "msg_1", "to": ["sam@test.com"]}, 6,
+        people=("sam@test.com",))
+    plan = s.plan_rollback(cal.conn, at(0), at(30))
+    assert [st.strategy for st in plan.steps] == ["email_correction", "exact_restore"]
+    assert all(st.will_run for st in plan.steps) and cal.calls == []
+    assert plan.summary() == "Will undo 2 changes (2 agent actions) and tell 2 people it's fixed."
+    assert all(a.status == "done" for a in db.list_actions(cal.conn))
+    assert "cancelled 'CS 598 demo prep'" in plan.steps[1].what_happened
+
+
+def test_event_a_person_edited_after_the_agent_is_skipped(cal):
+    act(cal.conn, s.UPDATE, "evt_demo", DEMO, MOVED, 5)
+    cal.calendar["evt_demo"] = {**MOVED, "location": "CDS 701"}        # a person edited it
+    [step] = s.plan_rollback(cal.conn, at(0), at(30)).steps
+    assert not step.will_run and "would overwrite their change" in step.skip_reason
+    assert step.will_notify == []
+
+
+def test_cancelled_event_someone_already_put_back_is_skipped(cal):
+    act(cal.conn, s.CANCEL, "evt_demo", DEMO, None, 5)
+    cal.calendar["evt_demo"] = DEMO
+    [step] = s.plan_rollback(cal.conn, at(0), at(30)).steps
+    assert not step.will_run and "already put it back" in step.skip_reason
+
+
+def test_created_event_a_person_edited_is_skipped(cal):
+    act(cal.conn, s.CREATE, "evt_new", None, NEW, 5)
+    cal.calendar["evt_new"] = {**NEW, "description": "agenda added by Sam"}
+    [step] = s.plan_rollback(cal.conn, at(0), at(30)).steps
+    assert not step.will_run and "edited the event the agent created" in step.skip_reason
+
+
+def test_created_then_removed_needs_no_work(cal):
+    act(cal.conn, s.CREATE, "evt_new", None, NEW, 5)
+    act(cal.conn, s.CANCEL, "evt_new", NEW, None, 6)
+    [step] = s.plan_rollback(cal.conn, at(0), at(30)).steps
+    assert step.strategy == s.NOTHING and step.will_run and step.will_notify == []
+
+
+def test_fingerprint_changes_when_the_situation_changes(cal):
+    act(cal.conn, s.UPDATE, "evt_demo", DEMO, MOVED, 5)
+    cal.calendar["evt_demo"] = MOVED
+    before = s.plan_rollback(cal.conn, at(0), at(30)).fingerprint()
+    cal.calendar["evt_demo"] = {**MOVED, "summary": "Renamed by Aryan"}
+    assert s.plan_rollback(cal.conn, at(0), at(30)).fingerprint() != before
+
+
+def test_to_dict_is_plain_data(cal):
+    act(cal.conn, s.CANCEL, "evt_demo", DEMO, None, 5)
+    out = s.plan_rollback(cal.conn, at(0), at(30)).to_dict()
+    assert "record" not in out["steps"][0] and out["summary"].startswith("Will undo 1 change ")
