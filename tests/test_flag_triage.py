@@ -16,6 +16,7 @@ from core import flag_triage as t
     ("There's a typo in the title", "wrong_details"),
     ("We still need this meeting, please put it back", "bring_back"),
     ("Why was our demo prep cancelled??", "bring_back"),
+    ("Please put it back, I need it to prep for my interview", "bring_back"),
     ("All good, thanks!", "fine"),
     ("No worries", "fine"),
     ("hmm", "unclear"),

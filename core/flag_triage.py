@@ -69,8 +69,9 @@ def _plain(label: str) -> str:
 
 
 # ---------- rules (no AI needed) ----------
-# Checked in this order; the first match wins. "fine" is checked last, so
-# "thanks, but this clashes with my class" counts as a conflict.
+# Checked in this order; the first match wins. An explicit "put it back" wins over a
+# mention of other plans, and "fine" is checked last, so "thanks, but this clashes
+# with my class" counts as a conflict.
 
 def _any(*patterns: str) -> re.Pattern:
     return re.compile("|".join(patterns), re.IGNORECASE)
@@ -84,6 +85,12 @@ RULES: list[tuple[str, re.Pattern]] = [
         r"\bshouldn'?t (be|have been) (on|in|invited|included)\b",
         r"\bmeant for (someone|somebody|another)\b", r"\bnot (meant|for) me\b",
         r"\b(i'?m|i am) not (part of|in|on)\b")),
+    ("bring_back", _any(
+        r"\b(put|bring|add) (it|this|that) back\b", r"\brestore", r"\bundo\b",
+        r"\buncancel", r"\bstill (need|want|happening|on)\b", r"\bwe need (it|this|that)\b",
+        r"\bshouldn'?t (have been|be) (cancel|delet|remov|mov)",
+        r"\bwhy (was|is|did) (it|this|that|our)?.{0,20}(cancel|delet|remov|disappear)",
+        r"\bby mistake\b", r"\b(was|got) cancell?ed\b", r"\bdon'?t cancel\b")),
     ("conflict", _any(
         r"\bclash", r"\bconflict", r"\bdouble[- ]?book", r"\boverlap",
         r"\balready (have|has|booked|got|scheduled)\b", r"\bsame time as\b",
@@ -99,12 +106,6 @@ RULES: list[tuple[str, re.Pattern]] = [
         r"\bwrong (title|name|room|place|location|link|address|attachment|info|subject|file)",
         r"\btypo\b", r"\bmisspel", r"\bincorrect\b", r"\bmeant to say\b",
         r"\bbroken link\b", r"\bwrong zoom\b", r"\b(link|room) (is|was) wrong\b")),
-    ("bring_back", _any(
-        r"\b(put|bring|add) (it|this|that) back\b", r"\brestore", r"\bundo\b",
-        r"\buncancel", r"\bstill (need|want|happening|on)\b", r"\bwe need (it|this|that)\b",
-        r"\bshouldn'?t (have been|be) (cancel|delet|remov|mov)",
-        r"\bwhy (was|is|did) (it|this|that|our)?.{0,20}(cancel|delet|remov|disappear)",
-        r"\bby mistake\b", r"\b(was|got) cancell?ed\b", r"\bdon'?t cancel\b")),
     ("fine", _any(
         r"\b(it'?s|that'?s|this is|all) (fine|good|ok(ay)?)\b", r"\bno (problem|worries|issue)",
         r"\bworks (for me|fine|great)\b", r"\blooks (good|right|fine)\b",
