@@ -286,3 +286,34 @@ def test_nothing_to_roll_back(server):
     preview = mcp_server.preview_rollback(minutes=30)
     assert "approval_code" not in preview and "nothing to roll back" in preview["summary"]
     assert not mcp_server.rollback_session("not a time", "x", "1.x")["ok"]
+
+
+# ---------- Visista's schedule check (no double-booking, 15-minute gap) ----------
+
+def test_agent_moves_and_bookings_ask_for_the_schedule_check(server, monkeypatch):
+    seen = []
+    ct = mcp_server.calendar_tools
+
+    def update(event_id, changes, *, check_schedule=False):
+        seen.append(("update", check_schedule))
+        return {"before": {"id": event_id, "summary": "1:1"}, "after": {"id": event_id}}
+
+    def create(event, *, check_schedule=False):
+        seen.append(("create", check_schedule))
+        return {"before": None, "after": {"id": "evt_new", "summary": "Sync"}}
+
+    monkeypatch.setattr(ct, "calendar_update", update)
+    monkeypatch.setattr(ct, "calendar_create", create)
+    mcp_server.update_event("evt_1on1", {"start": "2026-11-20T15:00"}, "Move my 1:1")
+    mcp_server.create_event({"summary": "Sync"}, "Book a sync")
+    assert seen == [("update", True), ("create", True)]
+
+
+def test_a_refused_booking_passes_the_free_time_suggestion_to_claude(server, monkeypatch):
+    def create(event, *, check_schedule=False):
+        raise ValueError("Can't book Fri 3:00 PM: it collides with 'CS 598 demo prep'. "
+                         "The next free time is Fri 4:15 PM.")
+    monkeypatch.setattr(mcp_server.calendar_tools, "calendar_create", create)
+    out = mcp_server.create_event({"summary": "Sync"}, "Book a sync")
+    assert not out["ok"] and "next free time is Fri 4:15 PM" in out["message"]
+    assert "Nothing was changed" in out["message"] and db.list_actions(server) == []

@@ -25,6 +25,7 @@ they are placeholders, so write tools report "not found" instead of acting.
 """
 from __future__ import annotations
 
+import inspect
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -101,6 +102,16 @@ def _attempt(what: str, call):
         return None, _fail(f"Couldn't {what}: {exc}. Nothing was changed.")
 
 
+def _checked(func, *args):
+    """Call a calendar write with Visista's schedule check on: the agent may not book
+    over another meeting or without a 15-minute gap (it gets a free time suggested
+    instead). Only the agent's own calls are checked; undo and repair are not. Older
+    google_tools without the check are called as before."""
+    if "check_schedule" in inspect.signature(func).parameters:
+        return func(*args, check_schedule=True)
+    return func(*args)
+
+
 # ---------- read-only tools (not logged) ----------
 
 @mcp.tool()
@@ -138,7 +149,7 @@ def update_event(event_id: str, changes: dict, instruction: str) -> dict:
     if not changes:
         return _fail("No changes given.")
     result, error = _attempt("change the event",
-                             lambda: calendar_tools.calendar_update(event_id, changes))
+                             lambda: _checked(calendar_tools.calendar_update, event_id, changes))
     if error:
         return error
     if not result.get("before"):
@@ -151,7 +162,7 @@ def update_event(event_id: str, changes: dict, instruction: str) -> dict:
 def create_event(event: dict, instruction: str) -> dict:
     """Create a calendar event: {"summary", "start", "end", "attendees", ...}.
     instruction: the owner's original request, word for word."""
-    result, error = _attempt("create the event", lambda: calendar_tools.calendar_create(event))
+    result, error = _attempt("create the event", lambda: _checked(calendar_tools.calendar_create, event))
     if error:
         return error
     created = result.get("after")
