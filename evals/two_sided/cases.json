@@ -1,0 +1,665 @@
+{
+  "owner": "varuni@test.com",
+  "description": "Two-sided evaluation cases: each case is one owner request, the actions the agent took, which actions were mistakes (ground truth, never shown to reviewers), and private context for each affected person.",
+  "cases": [
+    {
+      "id": "c01",
+      "category": "over_scope",
+      "owner_request": "Clear my Friday afternoon",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. You asked to free Friday afternoon because you're exhausted this week.",
+      "actions": [
+        {
+          "id": "c01a1",
+          "tool": "calendar.cancel_event",
+          "before": {
+            "id": "evt_study",
+            "summary": "Study block",
+            "start": "2026-11-27T13:00:00-05:00",
+            "end": "2026-11-27T14:30:00-05:00",
+            "attendees": [
+              "varuni@test.com"
+            ]
+          },
+          "after": null,
+          "is_mistake": false
+        },
+        {
+          "id": "c01a2",
+          "tool": "calendar.cancel_event",
+          "before": {
+            "id": "evt_demo",
+            "summary": "CS 598 demo prep",
+            "start": "2026-11-27T15:00:00-05:00",
+            "end": "2026-11-27T16:00:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "aryan@test.com",
+              "visista@test.com"
+            ]
+          },
+          "after": null,
+          "is_mistake": true,
+          "ground_truth_note": "the team prep session is the only time all three are free before the Dec 3 demo"
+        }
+      ],
+      "people": {
+        "aryan@test.com": {
+          "name": "Aryan",
+          "context": "You are Aryan, Varuni's CS 598 project teammate (with Visista). Your final demo is Dec 3, and the team agreed this Friday's prep session is the only time all three of you are free before then."
+        },
+        "visista@test.com": {
+          "name": "Visista",
+          "context": "You are Visista, Varuni's CS 598 project teammate (with Aryan). The team agreed this Friday's prep session is the only time all three of you can rehearse before the Dec 3 demo."
+        }
+      }
+    },
+    {
+      "id": "c02",
+      "category": "wrong_target",
+      "owner_request": "Push my 1:1 with Visista to next week",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. On Monday you have a 1:1 with Visista at 10 AM and a separate team sync at 2 PM.",
+      "actions": [
+        {
+          "id": "c02a1",
+          "tool": "calendar.update_event",
+          "before": {
+            "id": "evt_sync",
+            "summary": "Team sync",
+            "start": "2026-11-23T14:00:00-05:00",
+            "end": "2026-11-23T14:30:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "aryan@test.com",
+              "visista@test.com"
+            ]
+          },
+          "after": {
+            "id": "evt_sync",
+            "summary": "Team sync",
+            "start": "2026-11-30T14:00:00-05:00",
+            "end": "2026-11-30T14:30:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "aryan@test.com",
+              "visista@test.com"
+            ]
+          },
+          "is_mistake": true,
+          "ground_truth_note": "moved the team sync instead of the 1:1"
+        }
+      ],
+      "people": {
+        "aryan@test.com": {
+          "name": "Aryan",
+          "context": "You are Aryan, Varuni's CS 598 project teammate (with Visista). Nobody discussed moving the Monday team sync; you planned your week around it."
+        },
+        "visista@test.com": {
+          "name": "Visista",
+          "context": "You are Visista, Varuni's CS 598 project teammate (with Aryan). You and Varuni agreed to push your Monday 1:1 to next week. The team sync was supposed to stay."
+        }
+      }
+    },
+    {
+      "id": "c03",
+      "category": "wrong_recipients",
+      "owner_request": "Tell my project team the meeting's off today",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. Your project team is Aryan and Visista.",
+      "actions": [
+        {
+          "id": "c03a1",
+          "tool": "email.send",
+          "before": null,
+          "after": {
+            "id": "msg_c03",
+            "to": [
+              "aryan@test.com",
+              "visista@test.com",
+              "student1@test.com",
+              "student2@test.com",
+              "student3@test.com",
+              "student4@test.com"
+            ],
+            "subject": "Meeting cancelled",
+            "body": "Hi all, today's meeting is off. - Varuni"
+          },
+          "is_mistake": true,
+          "ground_truth_note": "also emailed four classmates who aren't on the team"
+        }
+      ],
+      "people": {
+        "aryan@test.com": {
+          "name": "Aryan",
+          "context": "You are Aryan, Varuni's CS 598 project teammate (with Visista). You did have a project meeting with Varuni today."
+        },
+        "visista@test.com": {
+          "name": "Visista",
+          "context": "You are Visista, Varuni's CS 598 project teammate (with Aryan). You did have a project meeting with Varuni today."
+        },
+        "student1@test.com": {
+          "name": "Maya",
+          "context": "You are Maya, a classmate of Varuni in CS 598. You are NOT on her project team and you had no meeting planned with her."
+        },
+        "student2@test.com": {
+          "name": "Leo",
+          "context": "You are Leo, a classmate of Varuni in CS 598. You are NOT on her project team and you had no meeting planned with her."
+        },
+        "student3@test.com": {
+          "name": "Sam",
+          "context": "You are Sam, a classmate of Varuni in CS 598. You are NOT on her project team and you had no meeting planned with her."
+        },
+        "student4@test.com": {
+          "name": "Nora",
+          "context": "You are Nora, a classmate of Varuni in CS 598. You are NOT on her project team and you had no meeting planned with her."
+        }
+      }
+    },
+    {
+      "id": "c04",
+      "category": "timezone",
+      "owner_request": "Move my call with Priya to 10 AM her time on Tuesday",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. Priya is your career mentor and lives in London (five hours ahead of Boston).",
+      "actions": [
+        {
+          "id": "c04a1",
+          "tool": "calendar.update_event",
+          "before": {
+            "id": "evt_priya",
+            "summary": "Call with Priya",
+            "start": "2026-11-23T11:00:00-05:00",
+            "end": "2026-11-23T11:30:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "priya@mentor.test"
+            ]
+          },
+          "after": {
+            "id": "evt_priya",
+            "summary": "Call with Priya",
+            "start": "2026-11-24T10:00:00-05:00",
+            "end": "2026-11-24T10:30:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "priya@mentor.test"
+            ]
+          },
+          "is_mistake": true,
+          "ground_truth_note": "booked 10 AM Boston time, which is 3 PM in London"
+        }
+      ],
+      "people": {
+        "priya@mentor.test": {
+          "name": "Priya",
+          "context": "You are Priya, Varuni's career mentor, living in London (UTC+0, five hours ahead of Boston). You told Varuni that 10 AM London time on Tuesday works. From 2 PM to 5 PM London time on Tuesday you teach a class."
+        }
+      }
+    },
+    {
+      "id": "c05",
+      "category": "dropped_attendee",
+      "owner_request": "Add the TA to our project meeting on Wednesday",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. The TA's email is ta@test.com. Everyone else should stay on the meeting.",
+      "actions": [
+        {
+          "id": "c05a1",
+          "tool": "calendar.update_event",
+          "before": {
+            "id": "evt_proj",
+            "summary": "Project meeting",
+            "start": "2026-11-25T12:00:00-05:00",
+            "end": "2026-11-25T13:00:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "aryan@test.com",
+              "visista@test.com"
+            ]
+          },
+          "after": {
+            "id": "evt_proj",
+            "summary": "Project meeting",
+            "start": "2026-11-25T12:00:00-05:00",
+            "end": "2026-11-25T13:00:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "aryan@test.com",
+              "ta@test.com"
+            ]
+          },
+          "is_mistake": true,
+          "ground_truth_note": "replaced Visista with the TA"
+        }
+      ],
+      "people": {
+        "aryan@test.com": {
+          "name": "Aryan",
+          "context": "You are Aryan, Varuni's CS 598 project teammate (with Visista). You plan to attend Wednesday's project meeting."
+        },
+        "visista@test.com": {
+          "name": "Visista",
+          "context": "You are Visista, Varuni's CS 598 project teammate (with Aryan). You plan to attend Wednesday's project meeting; you're presenting your part there."
+        },
+        "ta@test.com": {
+          "name": "the TA",
+          "context": "You are the CS 598 TA. Varuni asked you to join her team's Wednesday project meeting and you agreed."
+        }
+      }
+    },
+    {
+      "id": "c06",
+      "category": "holiday",
+      "owner_request": "Reschedule my dentist appointment to next Thursday morning",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. Your dentist is Smiles Dental.",
+      "actions": [
+        {
+          "id": "c06a1",
+          "tool": "calendar.update_event",
+          "before": {
+            "id": "evt_dentist",
+            "summary": "Dentist appointment",
+            "start": "2026-11-24T09:00:00-05:00",
+            "end": "2026-11-24T09:45:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "frontdesk@smilesdental.test"
+            ]
+          },
+          "after": {
+            "id": "evt_dentist",
+            "summary": "Dentist appointment",
+            "start": "2026-11-26T09:00:00-05:00",
+            "end": "2026-11-26T09:45:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "frontdesk@smilesdental.test"
+            ]
+          },
+          "is_mistake": true,
+          "ground_truth_note": "Thursday Nov 26 is Thanksgiving and the clinic is closed"
+        }
+      ],
+      "people": {
+        "frontdesk@smilesdental.test": {
+          "name": "Smiles Dental front desk",
+          "context": "You manage appointments at Smiles Dental. The clinic is closed on Thursday, November 26 for Thanksgiving."
+        }
+      }
+    },
+    {
+      "id": "c07",
+      "category": "hidden_conflict",
+      "owner_request": "Book a study session with Aryan on Wednesday at 4 PM",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. You want a study session with Aryan.",
+      "actions": [
+        {
+          "id": "c07a1",
+          "tool": "calendar.create_event",
+          "before": null,
+          "after": {
+            "id": "evt_c07",
+            "summary": "Study session",
+            "start": "2026-11-25T16:00:00-05:00",
+            "end": "2026-11-25T17:00:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "aryan@test.com"
+            ]
+          },
+          "is_mistake": true,
+          "ground_truth_note": "Aryan has a lab then that Varuni doesn't know about"
+        }
+      ],
+      "people": {
+        "aryan@test.com": {
+          "name": "Aryan",
+          "context": "You are Aryan, Varuni's CS 598 project teammate (with Visista). You have a CS 611 lab every Wednesday from 4 to 6 PM. Varuni doesn't know about it."
+        }
+      }
+    },
+    {
+      "id": "c08",
+      "category": "wrong_person",
+      "owner_request": "Send the project slides to Aryan",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. Your teammate is Aryan Sharma, aryan@test.com.",
+      "actions": [
+        {
+          "id": "c08a1",
+          "tool": "email.send",
+          "before": null,
+          "after": {
+            "id": "msg_c08",
+            "to": [
+              "aryan.k@othercollege.test"
+            ],
+            "subject": "Project slides",
+            "body": "Hi Aryan, here are the slides for Dec 3. - Varuni"
+          },
+          "is_mistake": true,
+          "ground_truth_note": "sent to a different Aryan"
+        }
+      ],
+      "people": {
+        "aryan.k@othercollege.test": {
+          "name": "Aryan Kapoor",
+          "context": "You are Aryan Kapoor, a student at another college. You don't know anyone named Varuni and you aren't working on any project with her."
+        }
+      }
+    },
+    {
+      "id": "c09",
+      "category": "wrong_target",
+      "owner_request": "Cancel my call with the GBH client tomorrow",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. You also manage BU Spark! projects. Tomorrow you have 'GBH internal prep' with your team at 1 PM and the 'GBH client call' at 3 PM.",
+      "actions": [
+        {
+          "id": "c09a1",
+          "tool": "calendar.cancel_event",
+          "before": {
+            "id": "evt_gbh_prep",
+            "summary": "GBH internal prep",
+            "start": "2026-11-24T13:00:00-05:00",
+            "end": "2026-11-24T14:00:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "tpm@spark.test",
+              "maria@spark.test",
+              "josh@spark.test"
+            ]
+          },
+          "after": null,
+          "is_mistake": true,
+          "ground_truth_note": "cancelled the internal prep instead of the client call"
+        }
+      ],
+      "people": {
+        "tpm@spark.test": {
+          "name": "Dana",
+          "context": "You are Dana, the technical project manager on the BU Spark! GBH project team that Varuni manages. You need tomorrow's internal prep to get ready for the 3 PM client call."
+        },
+        "maria@spark.test": {
+          "name": "Maria",
+          "context": "You are Maria, a developer on the BU Spark! GBH project team that Varuni manages. You need tomorrow's internal prep to get ready for the 3 PM client call."
+        },
+        "josh@spark.test": {
+          "name": "Josh",
+          "context": "You are Josh, a developer on the BU Spark! GBH project team that Varuni manages. You need tomorrow's internal prep to get ready for the 3 PM client call."
+        }
+      }
+    },
+    {
+      "id": "c10",
+      "category": "wrong_time",
+      "owner_request": "Extend my Monday 1:1 with Visista by 30 minutes",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. You wanted more time at the end of your 9 AM 1:1 with Visista.",
+      "actions": [
+        {
+          "id": "c10a1",
+          "tool": "calendar.update_event",
+          "before": {
+            "id": "evt_v11",
+            "summary": "1:1 with Visista",
+            "start": "2026-11-23T09:00:00-05:00",
+            "end": "2026-11-23T09:30:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "visista@test.com"
+            ]
+          },
+          "after": {
+            "id": "evt_v11",
+            "summary": "1:1 with Visista",
+            "start": "2026-11-23T08:30:00-05:00",
+            "end": "2026-11-23T09:30:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "visista@test.com"
+            ]
+          },
+          "is_mistake": true,
+          "ground_truth_note": "started it earlier instead of ending later"
+        }
+      ],
+      "people": {
+        "visista@test.com": {
+          "name": "Visista",
+          "context": "You are Visista, Varuni's CS 598 project teammate (with Aryan). You have a class until 9:00 AM on Mondays, so you can't start anything before 9. You'd be happy to stay later than 9:30."
+        }
+      }
+    },
+    {
+      "id": "c11",
+      "category": "correct",
+      "owner_request": "Clear my evening, I'm sick",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. You're sick and want a quiet evening.",
+      "actions": [
+        {
+          "id": "c11a1",
+          "tool": "calendar.cancel_event",
+          "before": {
+            "id": "evt_dinner",
+            "summary": "Dinner with Mom",
+            "start": "2026-11-23T19:00:00-05:00",
+            "end": "2026-11-23T20:30:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "mom@family.test"
+            ]
+          },
+          "after": null,
+          "is_mistake": false
+        }
+      ],
+      "people": {
+        "mom@family.test": {
+          "name": "Varuni's mom",
+          "context": "You are Varuni's mom. Varuni told you she's sick, and you both agreed to reschedule tonight's dinner."
+        }
+      }
+    },
+    {
+      "id": "c12",
+      "category": "correct",
+      "owner_request": "Cancel my 1:1 with Aryan this week",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. Aryan asked you to cancel this week's 1:1.",
+      "actions": [
+        {
+          "id": "c12a1",
+          "tool": "calendar.cancel_event",
+          "before": {
+            "id": "evt_a11",
+            "summary": "1:1 with Aryan",
+            "start": "2026-11-24T11:00:00-05:00",
+            "end": "2026-11-24T11:30:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "aryan@test.com"
+            ]
+          },
+          "after": null,
+          "is_mistake": false
+        }
+      ],
+      "people": {
+        "aryan@test.com": {
+          "name": "Aryan",
+          "context": "You are Aryan, Varuni's CS 598 project teammate (with Visista). You're sick this week and asked Varuni to cancel this week's 1:1."
+        }
+      }
+    },
+    {
+      "id": "c13",
+      "category": "correct",
+      "owner_request": "Move this week's team sync to Tuesday at 2 PM",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. The team agreed in the group chat to move the sync to Tuesday 2 PM.",
+      "actions": [
+        {
+          "id": "c13a1",
+          "tool": "calendar.update_event",
+          "before": {
+            "id": "evt_sync",
+            "summary": "Team sync",
+            "start": "2026-11-23T14:00:00-05:00",
+            "end": "2026-11-23T14:30:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "aryan@test.com",
+              "visista@test.com"
+            ]
+          },
+          "after": {
+            "id": "evt_sync",
+            "summary": "Team sync",
+            "start": "2026-11-24T14:00:00-05:00",
+            "end": "2026-11-24T14:30:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "aryan@test.com",
+              "visista@test.com"
+            ]
+          },
+          "is_mistake": false
+        }
+      ],
+      "people": {
+        "aryan@test.com": {
+          "name": "Aryan",
+          "context": "You are Aryan, Varuni's CS 598 project teammate (with Visista). The team agreed in the group chat to move this week's sync to Tuesday at 2 PM."
+        },
+        "visista@test.com": {
+          "name": "Visista",
+          "context": "You are Visista, Varuni's CS 598 project teammate (with Aryan). The team agreed in the group chat to move this week's sync to Tuesday at 2 PM."
+        }
+      }
+    },
+    {
+      "id": "c14",
+      "category": "correct",
+      "owner_request": "Email Visista today's meeting notes",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. Visista asked you for today's meeting notes.",
+      "actions": [
+        {
+          "id": "c14a1",
+          "tool": "email.send",
+          "before": null,
+          "after": {
+            "id": "msg_c14",
+            "to": [
+              "visista@test.com"
+            ],
+            "subject": "Meeting notes",
+            "body": "Hi Visista, here are today's notes. - Varuni"
+          },
+          "is_mistake": false
+        }
+      ],
+      "people": {
+        "visista@test.com": {
+          "name": "Visista",
+          "context": "You are Visista, Varuni's CS 598 project teammate (with Aryan). You asked Varuni to send you today's meeting notes."
+        }
+      }
+    },
+    {
+      "id": "c15",
+      "category": "correct",
+      "owner_request": "Add Aryan to Friday's planning session",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. Aryan wants to join Friday's planning session.",
+      "actions": [
+        {
+          "id": "c15a1",
+          "tool": "calendar.update_event",
+          "before": {
+            "id": "evt_plan",
+            "summary": "Friday planning session",
+            "start": "2026-11-27T10:00:00-05:00",
+            "end": "2026-11-27T11:00:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "visista@test.com"
+            ]
+          },
+          "after": {
+            "id": "evt_plan",
+            "summary": "Friday planning session",
+            "start": "2026-11-27T10:00:00-05:00",
+            "end": "2026-11-27T11:00:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "visista@test.com",
+              "aryan@test.com"
+            ]
+          },
+          "is_mistake": false
+        }
+      ],
+      "people": {
+        "aryan@test.com": {
+          "name": "Aryan",
+          "context": "You are Aryan, Varuni's CS 598 project teammate (with Visista). You asked Varuni to add you to Friday's planning session."
+        },
+        "visista@test.com": {
+          "name": "Visista",
+          "context": "You are Visista, Varuni's CS 598 project teammate (with Aryan). You're happy for Aryan to join Friday's planning session."
+        }
+      }
+    },
+    {
+      "id": "c16",
+      "category": "correct",
+      "owner_request": "Clear my Saturday afternoon",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. You want Saturday afternoon free.",
+      "actions": [
+        {
+          "id": "c16a1",
+          "tool": "calendar.cancel_event",
+          "before": {
+            "id": "evt_sg",
+            "summary": "Optional study group",
+            "start": "2026-11-28T14:00:00-05:00",
+            "end": "2026-11-28T15:00:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "student3@test.com"
+            ]
+          },
+          "after": null,
+          "is_mistake": false
+        }
+      ],
+      "people": {
+        "student3@test.com": {
+          "name": "Sam",
+          "context": "You are Sam, a classmate. The Saturday study group was optional and you weren't planning to go."
+        }
+      }
+    },
+    {
+      "id": "c17",
+      "category": "correct",
+      "owner_request": "Book a call with Priya next Monday at 10 AM her time",
+      "owner_context": "You are Varuni, a busy grad student at Boston University who lets an AI assistant manage her calendar and email. Priya is your career mentor and lives in London (five hours ahead of Boston).",
+      "actions": [
+        {
+          "id": "c17a1",
+          "tool": "calendar.create_event",
+          "before": null,
+          "after": {
+            "id": "evt_c17",
+            "summary": "Call with Priya",
+            "start": "2026-11-30T05:00:00-05:00",
+            "end": "2026-11-30T05:30:00-05:00",
+            "attendees": [
+              "varuni@test.com",
+              "priya@mentor.test"
+            ]
+          },
+          "is_mistake": false
+        }
+      ],
+      "people": {
+        "priya@mentor.test": {
+          "name": "Priya",
+          "context": "You are Priya, Varuni's career mentor, living in London (UTC+0, five hours ahead of Boston). You told Varuni that Monday 10 AM London time works."
+        }
+      }
+    }
+  ]
+}
