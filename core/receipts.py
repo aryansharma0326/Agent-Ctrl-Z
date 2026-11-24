@@ -239,3 +239,40 @@ def send_fixed_notices(action: ActionRecord, result: UndoResult) -> list[dict]:
         except Exception:
             continue
     return sent
+
+
+def rollback_notices(fixes: list[tuple[ActionRecord, UndoResult]],
+                     owner: str | None = None) -> list[dict]:
+    """After a session rollback: ONE note per person listing every fix that affected
+    them, instead of a separate email for each action."""
+    owner = owner or owner_email()
+    lines: dict[str, list[str]] = {}
+    for action, result in fixes:
+        if not result.success:
+            continue
+        for person in result.notify:
+            if person != owner:
+                lines.setdefault(person, []).append(
+                    f"- It {describe(action)}. What we did: {result.details}")
+    notes = []
+    for person, items in lines.items():
+        n = len(items)
+        notes.append({
+            "to": person,
+            "subject": f"Fixed: {n} change{'s' if n != 1 else ''} by {owner}'s AI assistant",
+            "body": (f"Hi,\n\nSorry about that! {owner} rolled back what their AI assistant "
+                     f"did recently. Here is what was fixed for you:\n\n" + "\n".join(items)
+                     + "\n\nNo action is needed from you."),
+        })
+    return notes
+
+
+def send_rollback_notices(fixes: list[tuple[ActionRecord, UndoResult]]) -> list[dict]:
+    sent = []
+    for n in rollback_notices(fixes):
+        try:
+            _send_now([n["to"]], n["subject"], n["body"])
+            sent.append(n)
+        except Exception:
+            continue
+    return sent
