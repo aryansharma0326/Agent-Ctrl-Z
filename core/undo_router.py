@@ -15,7 +15,9 @@ If the exact restore fails, group repair is tried as a fallback. After a
 successful undo, everyone in result.notify gets an "it's fixed" note.
 
 plan_undo() is the same decision as a dry run (nothing changes), so the owner or
-the agent can see exactly what an undo will do before it happens.
+the agent can see exactly what an undo will do before it happens. plan_for() and
+run_undo() do the same for any action record, so session rollback can undo a
+combined change (several agent actions on one event) in one step.
 
 The router never raises: it always returns an UndoResult. Flag text is never
 read here (it's untrusted); routing uses only the action log and the calendar.
@@ -147,11 +149,18 @@ def plan_undo(conn, action_id: str) -> UndoPlan:
     action = db.get_action(conn, action_id)
     if action is None:
         return UndoPlan(action_id, False, "none", f"No action with id {action_id}.")
-    what = describe(action)
     if action.status == "undone":
         return UndoPlan(action_id, False, "none",
-                        "This action was already undone, so there is nothing to do.", what)
+                        "This action was already undone, so there is nothing to do.",
+                        describe(action))
+    return plan_for(action)
 
+
+def plan_for(action: ActionRecord) -> UndoPlan:
+    """The plan for one action record, logged or combined (e.g. by session rollback).
+    Doesn't look at the database. Never raises."""
+    action_id = action.action_id
+    what = describe(action)
     people = action.affected_people
     if action.tool == "email.send":
         return UndoPlan(action_id, True, "email_correction",
@@ -181,6 +190,20 @@ def plan_undo(conn, action_id: str) -> UndoPlan:
 
 # ---------- the router ----------
 
+def run_undo(action: ActionRecord, plan: UndoPlan, flagged_by: list[str]) -> UndoResult:
+    """Carry out a plan with the right fixer. Saves nothing and never raises."""
+    try:
+        if not plan.can_undo:
+            return _fail(action.action_id, plan.explanation)
+        if plan.strategy == "email_correction":
+            return undo_email(action)
+        if plan.strategy == "remove_created_event":
+            return _undo_create(action)
+        return _undo_calendar_change(action, plan, flagged_by)
+    except Exception as exc:   # a fixer crashed: report it, never crash the dashboard
+        return _fail(action.action_id, f"Undo failed before finishing: {exc}")
+
+
 def route_undo(conn, action_id: str) -> UndoResult:
     """Undo one action and return what happened. Never raises."""
     plan = plan_undo(conn, action_id)
@@ -189,18 +212,7 @@ def route_undo(conn, action_id: str) -> UndoResult:
         return _fail(action_id, plan.explanation)
 
     flagged_by = [f.flagged_by for f in db.list_flags(conn) if f.action_id == action_id]
-    try:
-        if not plan.can_undo:
-            result = _fail(action_id, plan.explanation)
-        elif plan.strategy == "email_correction":
-            result = undo_email(action)
-        elif plan.strategy == "remove_created_event":
-            result = _undo_create(action)
-        else:
-            result = _undo_calendar_change(action, plan, flagged_by)
-    except Exception as exc:   # a fixer crashed: report it, never crash the dashboard
-        result = _fail(action_id, f"Undo failed before finishing: {exc}")
-
+    result = run_undo(action, plan, flagged_by)
     result.action_id = action_id
     db.save_undo_result(conn, result)
     db.set_action_status(conn, action_id, "undone" if result.success else "undo_failed")
