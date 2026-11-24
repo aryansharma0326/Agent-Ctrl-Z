@@ -61,6 +61,10 @@ def _outbox():
         conn.execute("""CREATE TABLE IF NOT EXISTS held_emails (
                             id TEXT PRIMARY KEY, to_json TEXT, subject TEXT, body TEXT,
                             send_at TEXT, status TEXT, message_json TEXT)""")
+        have = {row["name"] for row in conn.execute("PRAGMA table_info(held_emails)")}
+        for column in ("expires_at", "blast_json"):   # added Nov 24; older files lack them
+            if column not in have:
+                conn.execute(f"ALTER TABLE held_emails ADD COLUMN {column} TEXT")
         yield conn
         conn.commit()
     finally:
@@ -89,24 +93,71 @@ def _recipients(to) -> list[str]:
 
 # ---------- sending ----------
 def email_send(to: list[str], subject: str, body: str, hold_seconds: int | None = None) -> dict:
-    """Send an email, held for a short time first so it can still be stopped.
-    Returns {"before": None, "after": <email>}, where <email> has id, status
-    ("held" or "sent"), to, subject, body, and send_at for held emails."""
+    """Send an email, held first so it can still be stopped.
+    Returns {"before": None, "after": <email>}, where <email> has id, status, to, subject, body.
+
+    The AGENT's emails (no hold_seconds given) get a blast-radius score (blast_radius.py):
+      low    -> status "held", goes out after 10 s
+      medium -> status "held", goes out after 60 s
+      high   -> status "awaiting_approval": NOT sent unless the owner approves it
+                (approve_email / python -m google_tools.approvals); expires unsent
+    Then <email> also has "blast_radius" (score, tier, reasons) and send_at or expires_at.
+
+    hold_seconds given (receipts, "it's fixed" notes, alerts): no score;
+    0 sends right away (status "sent"), more holds it that long."""
     to = _recipients(to)
-    from google_tools import security   # here, to avoid a circular import
+    from google_tools import blast_radius, security   # here, to avoid a circular import
     security.check_links([subject, body], to)    # every link must really work for the recipients
-    hold = hold_seconds_default() if hold_seconds is None else int(hold_seconds)
-    if hold <= 0:
+    if hold_seconds is not None and int(hold_seconds) <= 0:
         message = get_backend().send_email(to, subject, body)
         return {"before": None, "after": {**message, "status": "sent"}}
 
     email_id = "held_" + uuid.uuid4().hex[:8]
-    send_at = _stamp(_now() + timedelta(seconds=hold))
+    after = {"id": email_id, "to": to, "subject": subject, "body": body}
+    blast = None
+    if hold_seconds is None:                   # the agent's email: score it
+        try:
+            blast = blast_radius.score_email(to, subject, body)
+        except Exception as exc:               # a broken score must not lose the email
+            blast = {"score": None, "tier": "medium", "hold_seconds": blast_radius.hold_for("medium"),
+                     "needs_approval": False, "reasons": [f"couldn't score it ({exc}), so held normally"],
+                     "points": {}}
+        after["blast_radius"] = blast
+    if blast and blast["needs_approval"]:
+        after.update(status="awaiting_approval",
+                     expires_at=_stamp(_now() + blast_radius.approval_window()))
+    else:
+        hold = int(hold_seconds) if hold_seconds is not None else blast["hold_seconds"]
+        after.update(status="held", send_at=_stamp(_now() + timedelta(seconds=hold)))
     with _outbox() as db:
-        db.execute("INSERT INTO held_emails VALUES (?, ?, ?, ?, ?, 'held', NULL)",
-                   (email_id, json.dumps(to), subject, body, send_at))
-    return {"before": None, "after": {"id": email_id, "status": "held", "to": to,
-                                      "subject": subject, "body": body, "send_at": send_at}}
+        db.execute("INSERT INTO held_emails (id, to_json, subject, body, send_at, status, "
+                   "message_json, expires_at, blast_json) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                   (email_id, json.dumps(to), subject, body, after.get("send_at"), after["status"],
+                    after.get("expires_at"), json.dumps(blast) if blast else None))
+    if blast:
+        blast_radius.record(email_id, to, subject, blast)
+    if after["status"] == "awaiting_approval":
+        _ask_owner(after)
+    return {"before": None, "after": after}
+
+
+def _ask_owner(email: dict) -> None:
+    """Tell the owner a high-blast-radius email is waiting. Never blocks the email."""
+    from google_tools import blast_radius, security
+    minutes = int(blast_radius.approval_window().total_seconds() // 60)
+    preview = email["body"].strip().replace("\n", " ")[:300]
+    security._alert(
+        "approval_needed", email["id"],
+        f"Agent-Ctrl-Z: approve this email? '{email['subject']}' to {len(email['to'])} people",
+        f"Your agent wants to send an email with a high blast radius, so it is waiting for you.\n"
+        f"It will NOT be sent unless you approve it within {minutes} minutes.\n\n"
+        f"  To: {', '.join(email['to'][:10])}{' ...' if len(email['to']) > 10 else ''}\n"
+        f"  Subject: {email['subject']}\n"
+        f"  Message: {preview}\n"
+        f"  Why: {blast_radius.explain(email['blast_radius'])}\n\n"
+        f"Review:  python -m google_tools.approvals\n"
+        f"Approve: python -m google_tools.approvals approve {email['id']}\n"
+        f"Deny:    python -m google_tools.approvals deny {email['id']}")
 
 
 def release_held_emails(now: datetime | None = None) -> list[dict]:
@@ -114,6 +165,8 @@ def release_held_emails(now: datetime | None = None) -> list[dict]:
     Safe to call from several places at once: each email is sent only once."""
     now = now or _now()
     with _outbox() as db:
+        db.execute("UPDATE held_emails SET status = 'expired' "
+                   "WHERE status = 'awaiting_approval' AND expires_at <= ?", (_stamp(now),))
         due = db.execute("SELECT * FROM held_emails WHERE status = 'held' AND send_at <= ?",
                          (_stamp(now),)).fetchall()
     released = []
@@ -139,18 +192,19 @@ def release_held_emails(now: datetime | None = None) -> list[dict]:
 
 # ---------- looking up and stopping held emails (used by undo_email) ----------
 def email_status(email_id: str) -> str | None:
-    """"held", "sending", "sent" or "stopped"; None if it was never held
-    (it was sent right away)."""
+    """"held", "awaiting_approval", "sending", "sent", "stopped" or "expired";
+    None if it was never held (it was sent right away)."""
     with _outbox() as db:
         row = db.execute("SELECT status FROM held_emails WHERE id = ?", (email_id,)).fetchone()
     return row["status"] if row else None
 
 
 def stop_held_email(email_id: str) -> bool:
-    """Stop a held email so it never goes out. True if it was stopped in time."""
+    """Stop a held (or waiting-for-approval) email so it never goes out.
+    True if it was stopped in time."""
     with _outbox() as db:
-        return db.execute("UPDATE held_emails SET status = 'stopped' "
-                          "WHERE id = ? AND status = 'held'", (email_id,)).rowcount == 1
+        return db.execute("UPDATE held_emails SET status = 'stopped' WHERE id = ? "
+                          "AND status IN ('held', 'awaiting_approval')", (email_id,)).rowcount == 1
 
 
 def sent_message(email_id: str) -> dict | None:
@@ -159,6 +213,52 @@ def sent_message(email_id: str) -> dict | None:
         row = db.execute("SELECT message_json FROM held_emails WHERE id = ?",
                          (email_id,)).fetchone()
     return json.loads(row["message_json"]) if row and row["message_json"] else None
+
+
+# ---------- owner approval for high-blast-radius emails ----------
+def _row(email_id: str):
+    with _outbox() as db:
+        return db.execute("SELECT * FROM held_emails WHERE id = ?", (email_id,)).fetchone()
+
+
+def pending_approvals(now: datetime | None = None) -> list[dict]:
+    """Emails waiting for the owner's OK, oldest first (expired ones are left out)."""
+    now = now or _now()
+    with _outbox() as db:
+        rows = db.execute("SELECT * FROM held_emails WHERE status = 'awaiting_approval' "
+                          "AND expires_at > ? ORDER BY expires_at", (_stamp(now),)).fetchall()
+    return [{"id": r["id"], "to": json.loads(r["to_json"]), "subject": r["subject"],
+             "body": r["body"], "expires_at": r["expires_at"],
+             "blast_radius": json.loads(r["blast_json"]) if r["blast_json"] else None} for r in rows]
+
+
+def approve_email(email_id: str, now: datetime | None = None) -> dict:
+    """The owner approves: the email goes out now. Returns the sent message.
+    Raises ValueError (with the reason) if it can't be approved."""
+    now = now or _now()
+    row = _row(email_id)
+    if row is None:
+        raise ValueError(f"No held email {email_id}.")
+    if row["status"] == "awaiting_approval" and row["expires_at"] <= _stamp(now):
+        with _outbox() as db:
+            db.execute("UPDATE held_emails SET status = 'expired' WHERE id = ?", (email_id,))
+        raise ValueError(f"Too late: {email_id} expired unsent. Ask the agent to send it again.")
+    if row["status"] != "awaiting_approval":
+        raise ValueError(f"{email_id} isn't waiting for approval (it is {row['status']}).")
+    with _outbox() as db:
+        db.execute("UPDATE held_emails SET status = 'held', send_at = ? "
+                   "WHERE id = ? AND status = 'awaiting_approval'", (_stamp(now), email_id))
+    for sent in release_held_emails(now):
+        if sent["id"] == email_id:
+            return sent["message"]
+    raise ValueError(f"{email_id} was approved but couldn't be sent yet; it will be retried.")
+
+
+def deny_email(email_id: str) -> bool:
+    """The owner says no: the email is never sent. True if it was still waiting."""
+    with _outbox() as db:
+        return db.execute("UPDATE held_emails SET status = 'stopped' WHERE id = ? "
+                          "AND status = 'awaiting_approval'", (email_id,)).rowcount == 1
 
 
 # ---------- keeping the sender running ----------

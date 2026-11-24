@@ -115,6 +115,9 @@ def _db():
         conn.execute("""CREATE TABLE IF NOT EXISTS alerts (
                             id INTEGER PRIMARY KEY, at TEXT, kind TEXT, key TEXT,
                             subject TEXT, body TEXT)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS email_scores (
+                            id INTEGER PRIMARY KEY, at TEXT, email_id TEXT, score INTEGER,
+                            tier TEXT, recipients INTEGER, subject TEXT, reasons_json TEXT)""")
         yield conn
         conn.commit()
     finally:

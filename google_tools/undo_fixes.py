@@ -151,15 +151,20 @@ def undo_email(action: ActionRecord) -> UndoResult:
         email_id = action.target_id
         subject = (action.after or {}).get("subject") or "(no subject)"
 
+        waiting = email_tools.email_status(email_id) == "awaiting_approval"
         if email_tools.stop_held_email(email_id):
             return _email_result(action, "email_unsent", True,
-                                 f"Stopped the email '{subject}' before it went out. "
+                                 f"Stopped the email '{subject}' before it went out"
+                                 f"{' (it was still waiting for your approval)' if waiting else ''}. "
                                  "Nobody received it.")
 
         status = email_tools.email_status(email_id)
         if status == "stopped":
             return _email_result(action, "email_unsent", False,
                                  f"The email '{subject}' was already stopped; it never went out.")
+        if status == "expired":
+            return _email_result(action, "email_unsent", False,
+                                 f"The email '{subject}' never went out: nobody approved it in time.")
         if status == "sending":
             return _email_result(action, "email_correction", False,
                                  f"The email '{subject}' is being sent right now. "
