@@ -317,3 +317,16 @@ def test_a_refused_booking_passes_the_free_time_suggestion_to_claude(server, mon
     out = mcp_server.create_event({"summary": "Sync"}, "Book a sync")
     assert not out["ok"] and "next free time is Fri 4:15 PM" in out["message"]
     assert "Nothing was changed" in out["message"] and db.list_actions(server) == []
+
+
+def test_claude_is_told_loudly_when_receipts_fail(server, monkeypatch):
+    from core import receipts
+
+    def refuse(to, subject, body):
+        raise ValueError("localhost links are refused when emailed to other people")
+    monkeypatch.setattr(receipts, "_send_now", refuse)
+    out = mcp_server.cancel_event("evt_demo", "Clear my Friday")
+    assert out["ok"] and out["receipts_sent"] == 0
+    assert set(out["receipts_not_sent"]) == {"aryan@test.com", "visista@test.com"}
+    assert "Warning: receipts could not be sent to 2 people" in out["message"]
+    assert "Tell the owner" in out["message"] and "localhost" in out["message"]

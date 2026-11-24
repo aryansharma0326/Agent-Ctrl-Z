@@ -35,7 +35,7 @@ from mcp.server.fastmcp import FastMCP
 
 from core.action_log import log_action
 from core.flag_triage import PROBLEMS as PROBLEM_KINDS, triage_all
-from core.receipts import describe, send_receipts
+from core.receipts import deliver_receipts, describe
 from core.session_rollback import plan_rollback, run_rollback
 from core.signing import matches, sign
 from core.undo_router import plan_undo, route_undo
@@ -82,10 +82,19 @@ def get_conn() -> sqlite3.Connection:
 
 
 def _done(rec, message: str) -> dict[str, Any]:
-    """Tell everyone affected (receipts), then report back to Claude."""
-    receipts = send_receipts(rec)
-    return {"ok": True, "action_id": rec.action_id, "message": message,
-            "affected_people": rec.affected_people, "receipts_sent": len(receipts)}
+    """Tell everyone affected (receipts), then report back to Claude. If any receipt
+    couldn't be sent, say so plainly: those people don't know about the change."""
+    sent, not_sent = deliver_receipts(rec)
+    out = {"ok": True, "action_id": rec.action_id, "message": message,
+           "affected_people": rec.affected_people, "receipts_sent": len(sent)}
+    if not_sent:
+        reason = next(iter(not_sent.values()))
+        out["receipts_not_sent"] = not_sent
+        out["message"] += (f" Warning: receipts could not be sent to {len(not_sent)} "
+                           f"{'person' if len(not_sent) == 1 else 'people'}, so they don't "
+                           f"know about this change and can't flag it. Tell the owner. "
+                           f"Reason: {reason}")
+    return out
 
 
 def _fail(message: str) -> dict[str, Any]:

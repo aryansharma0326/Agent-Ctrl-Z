@@ -193,3 +193,20 @@ def test_rollback_sends_each_person_one_note_listing_all_their_fixes():
     assert "Put it back." in notes["aryan@test.com"]["body"]
     assert "Sent a correction." in notes["aryan@test.com"]["body"]
     assert notes["visista@test.com"]["subject"].startswith("Fixed: 1 change by")
+
+
+def test_failed_receipts_are_reported_with_the_reason(monkeypatch):
+    action = ActionRecord(tool="calendar.cancel_event", target_id="evt_demo",
+                          before={"summary": "Demo prep", "start": "2026-11-20T15:00:00-05:00",
+                                  "end": "2026-11-20T16:00:00-05:00"},
+                          after=None, affected_people=["aryan@test.com", "visista@test.com"],
+                          instruction="x")
+
+    def send(to, subject, body):
+        if to == ["visista@test.com"]:
+            raise ValueError("Links that only work on this computer (localhost) are refused")
+    monkeypatch.setattr(rc, "_send_now", send)
+    sent, not_sent = rc.deliver_receipts(action)
+    assert [r["to"] for r in sent] == ["aryan@test.com"]
+    assert "localhost" in not_sent["visista@test.com"]
+    assert [r["to"] for r in rc.send_receipts(action)] == ["aryan@test.com"]

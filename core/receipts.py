@@ -181,16 +181,23 @@ def _send_now(to: list[str], subject: str, body: str) -> None:
         email_tools.email_send(to, subject, body)
 
 
-def send_receipts(action: ActionRecord) -> list[dict]:
-    """Send every receipt. A failed send never undoes or blocks the action."""
-    sent = []
+def deliver_receipts(action: ActionRecord) -> tuple[list[dict], dict[str, str]]:
+    """Send every receipt. Returns (sent, not_sent) where not_sent maps each person
+    whose receipt failed to the reason, e.g. a localhost Flag link refused by the
+    link check on real Google. A failed send never undoes or blocks the action."""
+    sent, not_sent = [], {}
     for r in make_receipts(action):
         try:
             _send_now([r["to"]], r["subject"], r["body"])
             sent.append(r)
-        except Exception:
-            continue
-    return sent
+        except Exception as exc:
+            not_sent[r["to"]] = str(exc)[:300] or type(exc).__name__
+    return sent, not_sent
+
+
+def send_receipts(action: ActionRecord) -> list[dict]:
+    """Send every receipt; returns the ones that went out."""
+    return deliver_receipts(action)[0]
 
 
 # ---------- flags ----------
