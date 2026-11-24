@@ -177,3 +177,70 @@ def test_to_dict_is_plain_data(cal):
     act(cal.conn, s.CANCEL, "evt_demo", DEMO, None, 5)
     out = s.plan_rollback(cal.conn, at(0), at(30)).to_dict()
     assert "record" not in out["steps"][0] and out["summary"].startswith("Will undo 1 change ")
+
+
+# ---------- running it ----------
+
+@pytest.fixture
+def sent(monkeypatch):
+    out = []
+    monkeypatch.setattr(s, "send_rollback_notices",
+                        lambda fixes: [out.append((a.target_id, r.notify)) or {"to": p}
+                                       for a, r in fixes for p in r.notify])
+    return out
+
+
+def test_rollback_runs_newest_first_and_marks_every_action(cal, sent):
+    a1 = act(cal.conn, s.UPDATE, "evt_demo", DEMO, MOVED, 1)
+    a2 = act(cal.conn, s.CANCEL, "evt_demo", MOVED, None, 2)
+    e1 = act(cal.conn, "email.send", "msg_1", None, {"id": "msg_1"}, 3, people=("sam@test.com",))
+    plan = s.plan_rollback(cal.conn, at(0), at(30))
+    report = s.run_rollback(cal.conn, plan)
+    assert cal.calls == [("email_correction", "msg_1"), ("exact_restore", "evt_demo")]
+    for a in (a1, a2, e1):
+        assert db.get_action(cal.conn, a.action_id).status == "undone"
+        assert db.list_undo_results(cal.conn, a.action_id)[0].success
+    assert report.summary() == "Undid 2 changes. Told 2 people it's fixed."
+
+
+def test_one_failure_does_not_stop_the_rest(cal, sent, monkeypatch):
+    def boom(action):
+        raise RuntimeError("Gmail is down")
+    monkeypatch.setattr(r, "undo_email", boom)
+    c = act(cal.conn, s.CANCEL, "evt_demo", DEMO, None, 1)
+    e = act(cal.conn, "email.send", "msg_1", None, {"id": "msg_1"}, 2)
+    report = s.run_rollback(cal.conn, s.plan_rollback(cal.conn, at(0), at(30)))
+    assert len(report.undone) == 1 and len(report.failed) == 1
+    assert "Gmail is down" in report.failed[0]["details"]
+    assert db.get_action(cal.conn, e.action_id).status == "undo_failed"
+    assert db.get_action(cal.conn, c.action_id).status == "undone"
+
+
+def test_skipped_changes_are_left_untouched(cal, sent):
+    a = act(cal.conn, s.UPDATE, "evt_demo", DEMO, MOVED, 1)
+    cal.calendar["evt_demo"] = {**MOVED, "summary": "Renamed by Aryan"}
+    report = s.run_rollback(cal.conn, s.plan_rollback(cal.conn, at(0), at(30)))
+    assert cal.calls == [] and len(report.skipped) == 1 and sent == []
+    assert db.get_action(cal.conn, a.action_id).status == "done"
+
+
+def test_created_then_removed_is_closed_without_calling_google(cal, sent):
+    a1 = act(cal.conn, s.CREATE, "evt_new", None, NEW, 1)
+    a2 = act(cal.conn, s.CANCEL, "evt_new", NEW, None, 2)
+    report = s.run_rollback(cal.conn, s.plan_rollback(cal.conn, at(0), at(30)))
+    assert cal.calls == [] and len(report.undone) == 1 and sent == []
+    assert {db.get_action(cal.conn, x.action_id).status for x in (a1, a2)} == {"undone"}
+
+
+def test_flaggers_are_passed_to_group_repair(cal, sent, monkeypatch):
+    from shared.models import Flag
+    seen = {}
+    monkeypatch.setattr(r, "group_repair", lambda action, state: seen.update(state) or
+                        UndoResult(action.action_id, "group_repair", True, "repaired", []))
+    a = act(cal.conn, s.CANCEL, "evt_demo", DEMO, None, 1)
+    db.save_flag(cal.conn, Flag(a.action_id, "aryan@test.com", "clashes"))
+    cal.calendar["evt_dentist"] = {"id": "evt_dentist", "summary": "Dentist",
+                                   "start": DEMO["start"], "end": DEMO["end"],
+                                   "attendees": ["aryan@test.com"]}
+    s.run_rollback(cal.conn, s.plan_rollback(cal.conn, at(0), at(30)))
+    assert seen["flagged_by"] == ["aryan@test.com"]

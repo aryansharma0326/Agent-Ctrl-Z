@@ -20,14 +20,14 @@ and switch to group repair for no reason. So rollback works on NET changes:
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 
-from core.receipts import describe
+from core.receipts import describe, send_rollback_notices
 from core.undo_router import (ALREADY_BACK, EDITED_AFTER, UndoPlan, calendar_tools,
-                               edited_after_agent, plan_for)
+                               edited_after_agent, plan_for, run_undo)
 from shared import db
-from shared.models import ActionRecord
+from shared.models import ActionRecord, UndoResult
 
 ROLLBACKABLE = ("done", "flagged", "undo_failed")
 CREATE, CANCEL, UPDATE = "calendar.create_event", "calendar.cancel_event", "calendar.update_event"
@@ -205,3 +205,57 @@ def plan_rollback(conn, since: str, until: str | None = None) -> RollbackPlan:
             [] if reason else list(plan.will_notify),
             reason is None, reason, change.record, plan))
     return RollbackPlan(since, until, steps)
+
+
+# ---------- run it ----------
+
+@dataclass
+class RollbackReport:
+    undone: list[dict] = field(default_factory=list)
+    failed: list[dict] = field(default_factory=list)
+    skipped: list[dict] = field(default_factory=list)
+    told_its_fixed: list[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        text = f"Undid {len(self.undone)} change{'s' if len(self.undone) != 1 else ''}"
+        if self.failed:
+            text += f", {len(self.failed)} failed"
+        if self.skipped:
+            text += f", skipped {len(self.skipped)}"
+        return text + f". Told {len(self.told_its_fixed)} people it's fixed."
+
+    def to_dict(self) -> dict:
+        return {"summary": self.summary(), **asdict(self)}
+
+
+def run_rollback(conn, plan: RollbackPlan) -> RollbackReport:
+    """Carry out a rollback plan, newest change first. Every original agent action gets
+    its own saved result and status. One failure never stops the rest. Never raises."""
+    report = RollbackReport()
+    flags = db.list_flags(conn)
+    fixes: list[tuple[ActionRecord, UndoResult]] = []
+    for step in plan.steps:
+        if not step.will_run:
+            report.skipped.append({**step.to_dict(), "details": step.skip_reason})
+            continue
+        if step.strategy == NOTHING:
+            result = UndoResult(step.action_ids[-1], "exact_restore", True, step.explanation, [])
+        else:
+            flagged_by = [f.flagged_by for f in flags if f.action_id in step.action_ids]
+            result = run_undo(step.record, step.plan, flagged_by)
+        for action_id in step.action_ids:
+            try:
+                db.save_undo_result(conn, replace(result, action_id=action_id))
+                db.set_action_status(conn, action_id, "undone" if result.success else "undo_failed")
+            except Exception as exc:          # keep going; say what couldn't be saved
+                result = replace(result, details=f"{result.details} (couldn't save: {exc})")
+        entry = {**step.to_dict(), "fix_used": result.fix_type, "details": result.details,
+                 "notify": result.notify}
+        (report.undone if result.success else report.failed).append(entry)
+        if result.success and step.record is not None:
+            fixes.append((step.record, result))
+    try:
+        report.told_its_fixed = [n["to"] for n in send_rollback_notices(fixes)]
+    except Exception:
+        report.told_its_fixed = []
+    return report
