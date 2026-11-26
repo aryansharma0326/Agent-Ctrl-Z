@@ -145,10 +145,11 @@ PROVIDER_LABELS = {"gemini": "Gemini", "groq": "Groq", "huggingface": "Hugging F
 
 
 def baseline_label(provider: Optional[str], model: Optional[str], prompt: str,
-                   mock: bool) -> str:
+                   mock: bool, max_turns: Optional[int] = None) -> str:
     if mock:
         return "Mock blind revert (NOT a model)"
-    return f"{PROVIDER_LABELS.get(provider or '', provider)} · {model} ({prompt} prompt)"
+    turns = f", {max_turns} turns" if max_turns else ""
+    return f"{PROVIDER_LABELS.get(provider or '', provider)} · {model} ({prompt} prompt{turns})"
 
 
 def make_chart(baselines: list[tuple[str, dict]], our_rates: dict, mock: bool,
@@ -231,7 +232,13 @@ def compare(files: list[str], chart: Path) -> int:
     for f, d in zip(files, loaded):
         b = d["baseline"]
         mock = mock or b.get("mock", False)
-        baselines.append((b.get("label") or b.get("name", f), d["summary"]["baseline"]))
+        # Rebuild the label from the saved settings so older files also show their
+        # turn cap (e.g. "8 turns" vs "20 turns" for the same model).
+        label = (baseline_label(b.get("provider"), b.get("model"), b.get("prompt_variant"),
+                                False, b.get("max_turns"))
+                 if b.get("model") and not b.get("mock") else
+                 b.get("label") or b.get("name", f))
+        baselines.append((label, d["summary"]["baseline"]))
     ours = loaded[0]["summary"]["ours"]
     n = len(loaded[0]["summary"].get("scored_scenarios") or loaded[0]["runs"]["ours"])
     for f, d in zip(files[1:], loaded[1:]):
@@ -303,7 +310,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("Every scenario errored; no results were written.", file=sys.stderr)
         return 2
 
-    label = baseline_label(args.provider, model, args.prompt, args.mock)
+    label = baseline_label(args.provider, model, args.prompt, args.mock, args.max_turns)
     keep = lambda runs: [r for r in runs if r["scenario"] not in errored]   # noqa: E731
     base_rates = failure_rates(keep(base_runs), scored)
     our_rates = failure_rates(keep(our_runs), scored)
