@@ -6,9 +6,12 @@ from __future__ import annotations
 
 
 
+from datetime import datetime
+
 import pytest
 
 from fake_data import fake_google as g
+from repair import group_repair as group_repair_module
 from fake_data.sample_data import ARYAN, OWNER, SCENARIOS, TEAM, VISISTA, event
 from fake_data.seed import seed
 from repair import calendar_adapter
@@ -21,12 +24,16 @@ from shared import db
 from shared.models import ActionRecord, Flag, UndoResult
 
 INJECTION = SCENARIOS[5]["flag"]["reason"]
+# The demo stories happen Nov 19-21, 2026. Group repair never plans a slot before
+# "now", so these tests run with the clock frozen just before them.
+DEMO_NOW = datetime(2026, 11, 18, 8, 0)
 
 
 @pytest.fixture(autouse=True)
 def fake_calendar(tmp_path, monkeypatch):
     monkeypatch.setattr(g, "STATE_PATH", tmp_path / "fake_google.json")
     monkeypatch.setenv("CTRLZ_CALENDAR_BACKEND", "fake")
+    monkeypatch.setattr(group_repair_module, "current_time", lambda: DEMO_NOW)
     g.reset([])
 
 
