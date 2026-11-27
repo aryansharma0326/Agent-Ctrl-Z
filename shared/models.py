@@ -22,7 +22,7 @@ Tool = Literal[
     "email.send",
 ]
 Status = Literal["done", "flagged", "undone", "undo_failed"]
-FixType = Literal["exact_restore", "email_correction", "group_repair"]
+FixType = Literal["exact_restore", "email_correction", "email_unsent", "group_repair"]
 
 
 def now_iso() -> str:

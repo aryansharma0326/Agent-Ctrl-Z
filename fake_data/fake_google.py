@@ -142,9 +142,12 @@ def add_event_as_is(event: dict) -> dict:
     return copy.deepcopy(e)
 
 
-def send_email(to: list[str], subject: str, body: str) -> dict:
+def send_email(to: list[str], subject: str, body: str, reply_to: dict | None = None) -> dict:
+    """Send right away. reply_to = an earlier message: the new one joins its thread."""
     _load()
-    msg = {"id": "msg_" + uuid.uuid4().hex[:6], "to": to, "subject": subject, "body": body}
+    msg_id = "msg_" + uuid.uuid4().hex[:6]
+    thread = (reply_to or {}).get("thread_id") or (reply_to or {}).get("id") or msg_id
+    msg = {"id": msg_id, "thread_id": thread, "to": to, "subject": subject, "body": body}
     SENT_EMAILS.append(msg)
     _save()
     return copy.deepcopy(msg)
