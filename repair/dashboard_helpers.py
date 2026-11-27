@@ -14,6 +14,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional
 
+from repair.blast_radius import BlastRadiusResult, score_calendar_action
 from repair.timeutil import attendee_emails, human_range, parse_time
 from shared import db
 from shared.models import ActionRecord, Flag, UndoResult
@@ -79,6 +80,39 @@ def describe_change(action: ActionRecord) -> tuple[str, str, str]:
         return verb, "(not sent)", describe_email(action.after or {})
     before = describe_event(action.before) if action.before else "(did not exist)"
     return verb, before, describe_event(action.after)
+
+
+# ------------------------------------------------------------------ blast radius
+
+def calendar_action_type(action: ActionRecord) -> Optional[str]:
+    """cancel / move / edit / create for a calendar action; None for anything else.
+    An update that changes the start or end time is a move, any other update an edit."""
+    if action.tool == "calendar.cancel_event":
+        return "cancel"
+    if action.tool == "calendar.create_event":
+        return "create"
+    if action.tool == "calendar.update_event":
+        before, after = action.before or {}, action.after or {}
+        for key in ("start", "end"):
+            try:
+                changed = parse_time(before[key]) != parse_time(after[key])
+            except Exception:
+                changed = before.get(key) != after.get(key)
+            if changed:
+                return "move"
+        return "edit"
+    return None
+
+
+def action_blast_radius(action: ActionRecord) -> Optional[BlastRadiusResult]:
+    """Blast radius of the agent's original calendar action, as of when it was done.
+    Scores the event before the change (the event itself for a create). None for
+    non-calendar actions or when there is no event to score. Read-only."""
+    kind = calendar_action_type(action)
+    event = action.after if kind == "create" else action.before
+    if kind is None or not event:
+        return None
+    return score_calendar_action(event, kind, now=action.timestamp)
 
 
 # ------------------------------------------------------------------ data
