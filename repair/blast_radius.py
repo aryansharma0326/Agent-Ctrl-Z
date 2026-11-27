@@ -43,6 +43,7 @@ and the new event for create.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -56,6 +57,10 @@ HOLD_SECONDS = {ACT_NOW: 0, HOLD_BRIEFLY: 60, ASK_OWNER: None}   # None = wait f
 LOCAL_TZ = ZoneInfo("America/New_York")      # zone for times written without one
 SOON = timedelta(hours=24)
 VERY_SOON = timedelta(hours=2)
+# Assumed length when an event has no end time, so a start in the past isn't
+# "in progress" forever: an hour for a timed event, the whole day for an all-day one.
+DEFAULT_LENGTH = timedelta(hours=1)
+ALL_DAY_LENGTH = timedelta(days=1)
 # Sharing one of these with the owner doesn't make someone a colleague.
 PUBLIC_DOMAINS = frozenset({"gmail.com", "googlemail.com", "outlook.com", "hotmail.com",
                             "live.com", "yahoo.com", "icloud.com", "me.com", "aol.com",
@@ -92,14 +97,25 @@ def tier_for(score: int, low: Optional[int] = None, high: Optional[int] = None) 
 
 
 # ------------------------------------------------------------------ inputs
+def _default_owner() -> str:
+    """The owner the rest of the app uses: OWNER_EMAIL (core/action_log.py), then the
+    email scorer's CTRLZ_OWNER_EMAIL, then whatever security.py works out."""
+    for var in ("OWNER_EMAIL", "CTRLZ_OWNER_EMAIL"):
+        if os.environ.get(var, "").strip():
+            return os.environ[var]
+    from google_tools import security          # read-only use of Visista's settings
+    return security.owner_email()
+
+
 def _owner_and_contacts(owner: Optional[str],
                         known: Optional[set[str]]) -> tuple[str, set[str]]:
-    """Defaults come from the same settings the email scorer uses
-    (CTRLZ_OWNER_EMAIL, CTRLZ_KNOWN_CONTACTS)."""
-    if owner is None or known is None:
-        from google_tools import security          # read-only use of Visista's settings
-        owner = security.owner_email() if owner is None else owner
-        known = security.known_contacts() if known is None else known
+    """Defaults: the app's owner setting (see _default_owner) and the email scorer's
+    CTRLZ_KNOWN_CONTACTS."""
+    if owner is None:
+        owner = _default_owner()
+    if known is None:
+        from google_tools import security
+        known = security.known_contacts()
     owner = owner.strip().lower()
     return owner, {k.strip().lower() for k in known} | {owner}
 
@@ -108,15 +124,23 @@ def _domain(email: str) -> str:
     return email.rpartition("@")[2]
 
 
+def _attendee_list(event: dict) -> list:
+    """The raw attendee entries; a single email string counts as one attendee."""
+    attendees = event.get("attendees") or []
+    return [attendees] if isinstance(attendees, str) else list(attendees)
+
+
 def _attendees(event: dict) -> list[str]:
-    """Unique attendee emails, lower-cased, skipping rooms and other resources."""
+    """Unique attendee emails, lower-cased, skipping rooms, other resources and blanks."""
     out: list[str] = []
-    for a in event.get("attendees") or []:
+    for a in _attendee_list(event):
         if isinstance(a, dict):
             if a.get("resource"):
                 continue
-            a = a.get("email", "")
-        email = str(a).strip().lower()
+            a = a.get("email")
+        if not isinstance(a, str):          # None or junk entries aren't people
+            continue
+        email = a.strip().lower()
         if email and email not in out:
             out.append(email)
     return out
@@ -125,7 +149,7 @@ def _attendees(event: dict) -> list[str]:
 def _responses(event: dict) -> dict[str, str]:
     """{email: responseStatus} from either event shape."""
     out = {str(k).strip().lower(): str(v) for k, v in (event.get("responses") or {}).items()}
-    for a in event.get("attendees") or []:
+    for a in _attendee_list(event):
         if isinstance(a, dict) and a.get("email") and a.get("responseStatus"):
             out[a["email"].strip().lower()] = str(a["responseStatus"])
     return out
@@ -157,6 +181,26 @@ def _as_aware(value: Any) -> Optional[datetime]:
     return value if value.tzinfo else value.replace(tzinfo=LOCAL_TZ)
 
 
+def _parse_now(now: Any) -> datetime:
+    """`now` as an aware datetime. None means the current time; anything else must be
+    readable, so a bad value can't silently turn into today's date."""
+    if now is None:
+        return datetime.now(timezone.utc)
+    parsed = _as_aware(now)
+    if parsed is None:
+        raise ValueError(f"now must be a datetime or an ISO time like "
+                         f"'2026-11-20T09:00-05:00', not {now!r}")
+    return parsed
+
+
+def _recurrence(event: dict) -> tuple[bool, bool]:
+    """(is recurring, is one occurrence of a series). Looks at the event and at "raw":
+    calendar_tools' flat shape keeps Google's recurrence fields only in raw."""
+    raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+    instance = bool(event.get("recurringEventId") or raw.get("recurringEventId"))
+    return bool(instance or event.get("recurrence") or raw.get("recurrence")), instance
+
+
 def _plural(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 
@@ -178,7 +222,7 @@ def calendar_factors(event: dict, action_type: str, now: Any = None, *,
         raise ValueError(f"action_type must be one of {', '.join(ACTION_TYPES)}, "
                          f"not {action_type!r}")
     owner, known = _owner_and_contacts(owner, known)
-    now = _as_aware(now) or datetime.now(timezone.utc)
+    now = _parse_now(now)
 
     people = _attendees(event) or [owner]          # no guest list = just the owner
     home = _domain(owner)
@@ -187,6 +231,9 @@ def calendar_factors(event: dict, action_type: str, now: Any = None, *,
     n = len(people)
 
     start, end = _as_aware(event.get("start")), _as_aware(event.get("end"))
+    if start is not None and end is None:
+        all_day = isinstance(event.get("start"), dict) and not event["start"].get("dateTime")
+        end = start + (ALL_DAY_LENGTH if all_day else DEFAULT_LENGTH)
     if start is None:
         imminence = (0, "start time unknown")
     elif end is not None and end <= now:
@@ -200,7 +247,7 @@ def calendar_factors(event: dict, action_type: str, now: Any = None, *,
     else:
         imminence = (0, f"starts in {_plural((start - now).days, 'day')}")
 
-    recurring = bool(event.get("recurrence") or event.get("recurringEventId"))
+    recurring, instance = _recurrence(event)
     accepted = sorted(p for p, status in _responses(event).items()
                       if status == "accepted" and p != owner)
 
@@ -211,7 +258,7 @@ def calendar_factors(event: dict, action_type: str, now: Any = None, *,
          _plural(n, "attendee")),
         ("imminence", *imminence),
         ("recurring", 2 if recurring else 0,
-         ("occurrence of a recurring series" if event.get("recurringEventId")
+         ("occurrence of a recurring series" if instance
           else "recurring series") if recurring else "one-off event"),
         ("accepted", 2 if accepted else 0,
          f"{len(accepted)} {'person' if len(accepted) == 1 else 'people'} already accepted"
@@ -230,8 +277,9 @@ def score_calendar_action(event: dict, action_type: str, now: Any = None, *,
     action_type  "cancel" | "move" | "edit" | "create"
     now          when the change happens (datetime or ISO string; default: now, UTC).
                  Naive values are New York time.
-    owner/known  the owner's email and known contacts; default to CTRLZ_OWNER_EMAIL
-                 and CTRLZ_KNOWN_CONTACTS, like the email scorer
+    owner/known  the owner's email and known contacts; default to OWNER_EMAIL (then
+                 CTRLZ_OWNER_EMAIL) and CTRLZ_KNOWN_CONTACTS
+    Raises ValueError for an unknown action_type or an unreadable `now`.
     """
     parts = calendar_factors(event, action_type, now, owner=owner, known=known)
     score = sum(points for _, points, _ in parts)

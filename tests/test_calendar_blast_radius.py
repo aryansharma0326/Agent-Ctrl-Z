@@ -22,6 +22,7 @@ STRANGERS = ["prof@university.edu", "ta@university.edu", "recruiter@company.com"
 def settings(monkeypatch):
     for name in ("USE_REAL_GOOGLE", "CTRLZ_BLAST_LOW_MAX", "CTRLZ_BLAST_HIGH_MIN"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OWNER_EMAIL", OWNER)          # the app's owner setting
     monkeypatch.setenv("CTRLZ_OWNER_EMAIL", OWNER)
     monkeypatch.setenv("CTRLZ_KNOWN_CONTACTS", f"{ARYAN},{VISISTA}")
 
