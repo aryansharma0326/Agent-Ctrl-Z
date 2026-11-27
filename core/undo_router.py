@@ -29,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 from core.action_log import owner_email
 from core.receipts import describe, send_fixed_notices
+from core.times import parse_iso
 from google_tools import calendar_tools
 from google_tools.undo_fixes import restore_calendar, undo_email
 from repair.group_repair import group_repair
@@ -44,7 +45,7 @@ EDITED_AFTER = "someone edited the event after the agent did"
 # ---------- small helpers ----------
 
 def _time(value: str) -> datetime:
-    t = datetime.fromisoformat(value)
+    t = parse_iso(value)
     return t if t.tzinfo else t.replace(tzinfo=DEFAULT_TZ)
 
 

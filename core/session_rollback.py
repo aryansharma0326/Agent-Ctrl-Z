@@ -24,6 +24,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 
 from core.receipts import describe, send_rollback_notices
+from core.times import parse_iso
 from core.undo_router import (ALREADY_BACK, EDITED_AFTER, UndoPlan, calendar_tools,
                                edited_after_agent, plan_for, run_undo)
 from shared import db
@@ -35,7 +36,7 @@ NOTHING = "nothing_to_undo"
 
 
 def _when(stamp: str) -> datetime:
-    t = datetime.fromisoformat(stamp)
+    t = parse_iso(stamp)
     return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 

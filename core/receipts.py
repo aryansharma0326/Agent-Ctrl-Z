@@ -24,6 +24,7 @@ from urllib.parse import urlencode
 
 from core.action_log import owner_email
 from core.signing import matches, sign
+from core.times import parse_iso
 from google_tools import email_tools
 from shared import db
 from shared.models import ActionRecord, Flag, UndoResult
@@ -98,8 +99,8 @@ def _zone(t: datetime) -> str:
 def _when(event: dict) -> str:
     """e.g. 'Fri Nov 20, 3:00 PM–4:00 PM UTC-5' (empty if the times are missing)."""
     try:
-        start = datetime.fromisoformat(event["start"])
-        end = datetime.fromisoformat(event["end"])
+        start = parse_iso(event["start"])
+        end = parse_iso(event["end"])
     except (KeyError, TypeError, ValueError):
         return ""
     return f"{start:%a %b} {start.day}, {_clock(start)}–{_clock(end)}{_zone(start)}"

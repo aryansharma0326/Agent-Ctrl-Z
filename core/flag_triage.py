@@ -34,6 +34,7 @@ from shared.models import ActionRecord, Flag, now_iso
 
 from core import llm
 from core.receipts import clean_flag_text, describe, looks_suspicious
+from core.times import parse_iso
 from core.undo_router import DEFAULT_TZ, plan_undo
 
 # What a flag can mean. Everything except "fine" and "unclear" is a real problem.
@@ -281,7 +282,7 @@ class ActionTriage:
 def _starts_at(action: ActionRecord) -> datetime | None:
     for copy in (action.before, action.after):
         try:
-            t = datetime.fromisoformat((copy or {})["start"])
+            t = parse_iso((copy or {})["start"])
         except (KeyError, TypeError, ValueError):
             continue
         return t if t.tzinfo else t.replace(tzinfo=DEFAULT_TZ)
