@@ -243,11 +243,15 @@ def _rsvp(event: Optional[dict], person: str) -> Optional[str]:
     return response_status(event, person)
 
 
-def _is_series(event: Optional[dict]) -> bool:
-    """A whole recurring series (not one occurrence). The flat shape keeps the rule in raw."""
+def _recurrence_rule(event: Optional[dict]) -> Optional[list]:
+    """A whole series' recurrence rule (not one occurrence's). The flat shape keeps it in raw."""
     event = event or {}
     raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
-    return bool(event.get("recurrence") or raw.get("recurrence"))
+    return event.get("recurrence") or raw.get("recurrence") or None
+
+
+def _is_series(event: Optional[dict]) -> bool:
+    return bool(_recurrence_rule(event))
 
 
 def _is_busy(event: dict, person: str, exclude_ids: set[str]) -> bool:
@@ -320,14 +324,14 @@ def _plan_cancel(action: ActionRecord, ctx: _Context) -> RepairPlan:
     # Someone who had declined the meeting isn't affected by it coming back.
     notify = [p for p in everyone if p != ctx.owner and _rsvp(before, p) != "declined"]
 
-    # A cancelled recurring series can only come back as a series. Re-creating it from
-    # this copy would make one single meeting, so refuse and say why.
-    if _is_series(before):
+    # A cancelled recurring series can only come back as a series. If this calendar
+    # can't create one, re-creating it would silently make one single meeting: refuse.
+    if _is_series(before) and not getattr(ctx.cal, "supports_recurrence", False):
         return _noop(action, False,
-                     f"Not repaired: '{title}' is a recurring series. Group repair can only "
-                     f"re-create single meetings, and doing that here would silently turn "
-                     f"the series into one meeting. Restore the series from Google Calendar's "
-                     f"trash instead. Nothing was changed.", original_slot=orig)
+                     f"Not repaired: '{title}' is a recurring series, and this calendar can "
+                     f"only re-create single meetings, which would silently turn the series "
+                     f"into one meeting. Restore the series from Google Calendar's trash "
+                     f"instead. Nothing was changed.", original_slot=orig)
 
     # Drift: the event is already back (someone restored it by hand or a fixer ran).
     t = ctx.target
@@ -546,6 +550,8 @@ def _clone(event: dict, start: datetime, end: datetime) -> dict:
     """Copy every piece of the original event (title, description, meeting link,
     attendees, ...) except Google's per-event ids, at the given time."""
     out = {k: copy.deepcopy(v) for k, v in event.items() if k not in VOLATILE_KEYS}
+    if _recurrence_rule(event):              # a series comes back as a series
+        out["recurrence"] = copy.deepcopy(_recurrence_rule(event))
     out["start"] = format_like(event["start"], start)
     out["end"] = format_like(event["end"], end)
     return out

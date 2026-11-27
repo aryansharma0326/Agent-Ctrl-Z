@@ -29,6 +29,7 @@ from repair.timeutil import overlaps, parse_time
 
 class CalendarBackend(Protocol):
     name: str
+    supports_recurrence: bool       # can create() make a recurring series?
 
     def get(self, event_id: str) -> Optional[dict]: ...
     def list(self, start: str, end: str) -> list[dict]: ...
@@ -39,6 +40,7 @@ class CalendarBackend(Protocol):
 class FakeGoogleCalendar:
     """Backend over fake_data/fake_google.py (shared JSON file)."""
     name = "fake_google"
+    supports_recurrence = False     # the fake calendar has no recurring series
 
     def get(self, event_id: str) -> Optional[dict]:
         from fake_data import fake_google as g
@@ -62,6 +64,7 @@ class FakeGoogleCalendar:
 class GoogleToolsCalendar:
     """Backend over google_tools/calendar_tools.py (Visista's real API code)."""
     name = "google_tools"
+    supports_recurrence = False     # calendar_create can't set "recurrence"
 
     def get(self, event_id: str) -> Optional[dict]:
         from google_tools import calendar_tools as ct
