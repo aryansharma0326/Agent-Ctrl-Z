@@ -180,8 +180,10 @@ def test_metadata_preserved_google_format():
         assert p[k] == ev[k], k
     for k in ("id", "etag", "htmlLink", "iCalUID", "status"):
         assert k not in p
-    assert p["start"] == {"dateTime": "2026-11-19T11:30:00", "timeZone": "America/Chicago"}
-    assert p["end"]["dateTime"] == "2026-11-19T12:30:00"
+    # Lab ends 11:30 New York, so the earliest slot is 11:30 New York (= 10:30 Chicago).
+    # The explicit offset keeps that instant exact; the event keeps its own timeZone.
+    assert p["start"] == {"dateTime": "2026-11-19T11:30:00-05:00", "timeZone": "America/Chicago"}
+    assert p["end"]["dateTime"] == "2026-11-19T12:30:00-05:00"
     assert plan.notify == [ARYAN]                   # organizer (owner) not notified
 
 
