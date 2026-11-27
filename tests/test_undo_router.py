@@ -193,3 +193,39 @@ def test_a_calendar_outage_while_planning_still_gives_a_plan(env):
     env.mp.setattr(r.calendar_tools, "calendar_get", down)
     plan = r.plan_undo(env.conn, log(env.conn, "calendar.cancel_event", before=DEMO).action_id)
     assert plan.can_undo and "Calendar API timeout" in plan.explanation
+
+
+# ---------- plan_for / run_undo: undo any action record, logged or not ----------
+
+def test_plan_for_and_run_undo_work_on_a_record_that_is_not_in_the_log(env):
+    combined = ActionRecord(tool="calendar.cancel_event", target_id="evt_demo", before=DEMO,
+                            after=None, affected_people=["aryan@test.com"],
+                            instruction="Clear my Friday; move it")
+    plan = r.plan_for(combined)
+    assert plan.strategy == "exact_restore" and plan.can_undo
+    out = r.run_undo(combined, plan, [])
+    assert out.success and env.calls == ["exact_restore"]
+    assert db.list_undo_results(env.conn, combined.action_id) == []   # run_undo saves nothing
+
+
+def test_run_undo_never_raises(env):
+    def boom(action, *args):
+        raise RuntimeError("Google is down")
+    env.mp.setattr(r, "restore_calendar", boom)
+    rec = ActionRecord(tool="calendar.cancel_event", target_id="evt_demo", before=DEMO,
+                       after=None, affected_people=[], instruction="x")
+    out = r.run_undo(rec, r.plan_for(rec), [])
+    assert not out.success and "Google is down" in out.details
+
+
+def test_a_person_adding_a_field_counts_as_an_edit(env):
+    moved = {**DEMO, "start": "2026-11-20T17:00:00-05:00", "end": "2026-11-20T18:00:00-05:00"}
+    env.calendar["evt_demo"] = {**moved, "location": "CDS 701"}      # agent's copy had none
+    rec = log(env.conn, "calendar.update_event", before=DEMO, after=moved)
+    assert r.plan_undo(env.conn, rec.action_id).conflict == r.EDITED_AFTER
+
+
+def test_blank_and_missing_fields_are_not_an_edit():
+    assert not r.edited_after_agent({**DEMO, "location": ""}, DEMO)
+    assert r.edited_after_agent({**DEMO, "location": "CDS 701"}, DEMO)
+    assert not r.edited_after_agent(None, DEMO)

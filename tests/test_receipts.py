@@ -169,3 +169,44 @@ def test_older_email_send_without_a_hold_still_works(action, monkeypatch):
     sent = []
     monkeypatch.setattr(rc.email_tools, "email_send", lambda to, s, b: sent.append(to))
     assert len(rc.send_receipts(action)) == 2 and len(sent) == 2
+
+
+# ---------- one combined note after a session rollback ----------
+
+def test_rollback_sends_each_person_one_note_listing_all_their_fixes():
+    demo = ActionRecord(tool="calendar.cancel_event", target_id="evt_demo",
+                        before={"summary": "Demo prep", "start": "2026-11-20T15:00:00-05:00",
+                                "end": "2026-11-20T16:00:00-05:00"},
+                        after=None, affected_people=["aryan@test.com"], instruction="x")
+    mail = ActionRecord(tool="email.send", target_id="msg_1", before=None,
+                        after={"subject": "Slides"}, affected_people=["aryan@test.com"],
+                        instruction="x")
+    fixes = [(demo, UndoResult(demo.action_id, "exact_restore", True, "Put it back.",
+                               ["aryan@test.com", "visista@test.com", "varuni@test.com"])),
+             (mail, UndoResult(mail.action_id, "email_correction", True, "Sent a correction.",
+                               ["aryan@test.com"])),
+             (mail, UndoResult(mail.action_id, "email_correction", False, "failed",
+                               ["sam@test.com"]))]
+    notes = {n["to"]: n for n in rc.rollback_notices(fixes, owner="varuni@test.com")}
+    assert set(notes) == {"aryan@test.com", "visista@test.com"}       # not the owner, not failures
+    assert notes["aryan@test.com"]["subject"] == "Fixed: 2 changes by varuni@test.com's AI assistant"
+    assert "Put it back." in notes["aryan@test.com"]["body"]
+    assert "Sent a correction." in notes["aryan@test.com"]["body"]
+    assert notes["visista@test.com"]["subject"].startswith("Fixed: 1 change by")
+
+
+def test_failed_receipts_are_reported_with_the_reason(monkeypatch):
+    action = ActionRecord(tool="calendar.cancel_event", target_id="evt_demo",
+                          before={"summary": "Demo prep", "start": "2026-11-20T15:00:00-05:00",
+                                  "end": "2026-11-20T16:00:00-05:00"},
+                          after=None, affected_people=["aryan@test.com", "visista@test.com"],
+                          instruction="x")
+
+    def send(to, subject, body):
+        if to == ["visista@test.com"]:
+            raise ValueError("Links that only work on this computer (localhost) are refused")
+    monkeypatch.setattr(rc, "_send_now", send)
+    sent, not_sent = rc.deliver_receipts(action)
+    assert [r["to"] for r in sent] == ["aryan@test.com"]
+    assert "localhost" in not_sent["visista@test.com"]
+    assert [r["to"] for r in rc.send_receipts(action)] == ["aryan@test.com"]

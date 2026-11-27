@@ -181,16 +181,23 @@ def _send_now(to: list[str], subject: str, body: str) -> None:
         email_tools.email_send(to, subject, body)
 
 
-def send_receipts(action: ActionRecord) -> list[dict]:
-    """Send every receipt. A failed send never undoes or blocks the action."""
-    sent = []
+def deliver_receipts(action: ActionRecord) -> tuple[list[dict], dict[str, str]]:
+    """Send every receipt. Returns (sent, not_sent) where not_sent maps each person
+    whose receipt failed to the reason, e.g. a localhost Flag link refused by the
+    link check on real Google. A failed send never undoes or blocks the action."""
+    sent, not_sent = [], {}
     for r in make_receipts(action):
         try:
             _send_now([r["to"]], r["subject"], r["body"])
             sent.append(r)
-        except Exception:
-            continue
-    return sent
+        except Exception as exc:
+            not_sent[r["to"]] = str(exc)[:300] or type(exc).__name__
+    return sent, not_sent
+
+
+def send_receipts(action: ActionRecord) -> list[dict]:
+    """Send every receipt; returns the ones that went out."""
+    return deliver_receipts(action)[0]
 
 
 # ---------- flags ----------
@@ -239,3 +246,94 @@ def send_fixed_notices(action: ActionRecord, result: UndoResult) -> list[dict]:
         except Exception:
             continue
     return sent
+
+
+def rollback_notices(fixes: list[tuple[ActionRecord, UndoResult]],
+                     owner: str | None = None) -> list[dict]:
+    """After a session rollback: ONE note per person listing every fix that affected
+    them, instead of a separate email for each action."""
+    owner = owner or owner_email()
+    lines: dict[str, list[str]] = {}
+    for action, result in fixes:
+        if not result.success:
+            continue
+        for person in result.notify:
+            if person != owner:
+                lines.setdefault(person, []).append(
+                    f"- It {describe(action)}. What we did: {result.details}")
+    notes = []
+    for person, items in lines.items():
+        n = len(items)
+        notes.append({
+            "to": person,
+            "subject": f"Fixed: {n} change{'s' if n != 1 else ''} by {owner}'s AI assistant",
+            "body": (f"Hi,\n\nSorry about that! {owner} rolled back what their AI assistant "
+                     f"did recently. Here is what was fixed for you:\n\n" + "\n".join(items)
+                     + "\n\nNo action is needed from you."),
+        })
+    return notes
+
+
+def send_rollback_notices(fixes: list[tuple[ActionRecord, UndoResult]]) -> list[dict]:
+    sent = []
+    for n in rollback_notices(fixes):
+        try:
+            _send_now([n["to"]], n["subject"], n["body"])
+            sent.append(n)
+        except Exception:
+            continue
+    return sent
+
+
+# ---------- receipts for emails that haven't gone out yet ----------
+# The agent's emails can be held for a few seconds, or wait for the owner's approval
+# when they look risky (Visista's blast radius). A receipt saying "the AI emailed you"
+# must not arrive before the email, or at all if the owner denies it. So receipts for
+# those emails wait here until the email is really sent.
+
+WAITING_TABLE = """
+CREATE TABLE IF NOT EXISTS waiting_receipts (
+    action_id  TEXT PRIMARY KEY,
+    since      TEXT NOT NULL
+);
+"""
+NEVER_SENT = ("stopped", "expired")
+
+
+def can_track_emails() -> bool:
+    """True if email_tools can say whether a held email has gone out yet."""
+    return callable(getattr(email_tools, "email_status", None))
+
+
+def wait_for_send(conn, action_id: str) -> None:
+    conn.executescript(WAITING_TABLE)
+    conn.execute("INSERT OR REPLACE INTO waiting_receipts VALUES (?, ?)",
+                 (action_id, datetime.now().astimezone().isoformat(timespec="seconds")))
+    conn.commit()
+
+
+def waiting(conn) -> list[str]:
+    conn.executescript(WAITING_TABLE)
+    return [r[0] for r in conn.execute("SELECT action_id FROM waiting_receipts ORDER BY since")]
+
+
+def send_due_receipts(conn) -> dict[str, list[str]]:
+    """Send receipts for waiting emails that have now gone out; drop the ones that never
+    will (stopped by an undo, denied or expired). Never raises."""
+    done: dict[str, list[str]] = {"sent": [], "dropped": []}
+    for action_id in waiting(conn):
+        try:
+            action = db.get_action(conn, action_id)
+            status = email_tools.email_status(action.target_id) if action else None
+        except Exception:
+            continue                       # try again next time
+        if status == "sent":
+            deliver_receipts(action)
+            done["sent"].append(action_id)
+        elif action is None or status is None or status in NEVER_SENT:
+            done["dropped"].append(action_id)
+        else:
+            continue                       # still held or waiting for approval
+        conn.execute("DELETE FROM waiting_receipts WHERE action_id = ?", (action_id,))
+        conn.commit()
+    return done
