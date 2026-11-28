@@ -14,9 +14,10 @@ from __future__ import annotations
 import streamlit as st
 
 from core.undo_router import route_undo
-from repair.dashboard_helpers import (DashboardItem, describe_change, dismiss_flags,
-                                      escape_markdown, load_items, metrics, preview_state,
-                                      sanitize_untrusted)
+from repair.blast_radius import ACT_NOW, ASK_OWNER, HOLD_BRIEFLY
+from repair.dashboard_helpers import (DashboardItem, action_blast_radius, describe_change,
+                                      dismiss_flags, escape_markdown, load_items, metrics,
+                                      preview_state, sanitize_untrusted)
 from repair.group_repair import CASE_A, CASE_B, CASE_C, CASE_D, plan_group_repair
 from shared import db
 
@@ -27,6 +28,11 @@ CASE_LABELS = {
     CASE_B: ("Reschedule to avoid double-booking", "orange"),
     CASE_C: ("Keep group meeting + makeup sync", "violet"),
     CASE_D: ("No change", "gray"),
+}
+BLAST_LABELS = {
+    ACT_NOW: ("Low blast radius · act now", "green"),
+    HOLD_BRIEFLY: ("Medium blast radius · 60 s hold", "orange"),
+    ASK_OWNER: ("High blast radius · ask owner", "red"),
 }
 STATUS_LABELS = {"done": "✅ done", "flagged": "🚩 flagged", "undone": "↩️ undone",
                  "undo_failed": "⚠️ undo failed"}
@@ -87,6 +93,24 @@ def render_change(item: DashboardItem) -> None:
         st.text(after)
     if a.affected_people:
         st.caption("Affected: " + md(", ".join(a.affected_people)))
+
+
+def render_blast_radius(item: DashboardItem) -> None:
+    """Read-only: how far the agent's original action could spread, and why."""
+    try:
+        br = action_blast_radius(item.action)
+    except Exception as exc:
+        st.caption(f"Blast radius unavailable: {md(exc)}")
+        return
+    if br is None:
+        st.caption("Blast radius: not scored (not a calendar change)")
+        return
+    label, color = BLAST_LABELS.get(br.tier, (br.tier, "gray"))
+    st.markdown(f":{color}-badge[{label}]  **Score {br.score}** "
+                "· how far the original action reached when the agent made it")
+    with st.expander("Why this blast radius?"):
+        for reason in br.reasons or ["Nothing risky found"]:
+            st.markdown(f"- {md(reason)}")
 
 
 def render_flags(item: DashboardItem) -> None:
@@ -150,6 +174,7 @@ with tab_pending:
         aid = item.action.action_id
         with st.container(border=True):
             render_change(item)
+            render_blast_radius(item)
             render_flags(item)
             render_preview(item)
             approve, dismiss, _ = st.columns([2, 2, 6])

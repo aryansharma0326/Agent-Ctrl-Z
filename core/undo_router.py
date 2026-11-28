@@ -116,9 +116,25 @@ def _undo_create(action: ActionRecord) -> UndoResult:
                       notify=action.affected_people)
 
 
+def _rsvps(action: ActionRecord) -> dict:
+    """Current RSVPs for group repair (the event now, else the logged copies).
+
+    A calendar error or timeout here must not fail the whole undo, so it
+    falls back to the copies in the action log.
+    """
+    try:
+        event = calendar_tools.calendar_get(action.target_id)
+    except Exception:
+        event = None
+    event = event or action.after or action.before
+    return dict((event or {}).get("responses") or {})
+
+
 def _undo_calendar_change(action: ActionRecord, plan: "UndoPlan",
                           flagged_by: list[str]) -> UndoResult:
-    state = {"flagged_by": flagged_by, "owner": owner_email()}
+    state = {"flagged_by": flagged_by, "owner": owner_email(),
+             "now": datetime.now(DEFAULT_TZ).isoformat(timespec="seconds"),
+             "responses": _rsvps(action)}
     if plan.strategy == "group_repair":
         result = group_repair(action, state)
         result.details = f"Plain restore skipped because {plan.conflict}. {result.details}"

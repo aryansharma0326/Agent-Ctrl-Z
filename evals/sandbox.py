@@ -16,6 +16,7 @@ from repair.timeutil import overlaps, parse_time
 
 class SandboxCalendar:
     name = "eval_sandbox"
+    supports_recurrence = True       # stores Google-style events, series included
 
     def __init__(self, events: list[dict]):
         self.events: dict[str, dict] = {e["id"]: copy.deepcopy(e) for e in events}

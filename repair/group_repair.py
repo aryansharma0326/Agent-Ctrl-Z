@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Optional
 
 from repair.calendar_adapter import CalendarBackend, get_calendar, window
@@ -64,6 +64,7 @@ MAKEUP_MAX = timedelta(minutes=30)
 VOLATILE_KEYS = {"id", "etag", "htmlLink", "iCalUID", "created", "updated", "sequence",
                  "status", "kind", "recurringEventId", "originalStartTime"}
 CALENDAR_TOOLS = {"calendar.cancel_event", "calendar.update_event"}
+NEW_YORK = timezone(timedelta(hours=-5))   # the app's zone for times written without one
 
 CASE_A = "A_exact_restore"
 CASE_B = "B_reschedule"
@@ -109,6 +110,11 @@ class RepairPlan:
 
 
 # --------------------------------------------------------------------------- API
+
+def current_time() -> datetime:
+    """The current New York wall-clock time (one place, so tests can freeze it)."""
+    return datetime.now(NEW_YORK).replace(tzinfo=None, microsecond=0)
+
 
 def group_repair(action: ActionRecord, current_state: dict) -> UndoResult:
     """current_state: what the calendar looks like now (from calendar_get / fake data).
@@ -188,7 +194,9 @@ class _Context:
         flagged = state.get("flagged_by") or []
         self.flaggers = [f.lower() for f in ([flagged] if isinstance(flagged, str) else flagged)]
         self.responses = {k.lower(): v for k, v in (state.get("responses") or {}).items()}
-        self.now = parse_time(state["now"]) if state.get("now") else None
+        # Never plan a slot in the past: without an explicit "now", use the current time
+        # (as a New York wall-clock time, like every other time here).
+        self.now = parse_time(state["now"]) if state.get("now") else current_time()
 
     def _current_target(self) -> Optional[dict]:
         tid = self.action.target_id
@@ -221,7 +229,29 @@ class _Context:
         return self.cal.list(*window(lo, hi))
 
     def response(self, person: str) -> Optional[str]:
-        return self.responses.get(person) or response_status(self.target, person)
+        return self.responses.get(person) or _rsvp(self.target, person)
+
+
+def _rsvp(event: Optional[dict], person: str) -> Optional[str]:
+    """A person's RSVP from either event shape: the app's "responses" dict (fake calendar
+    and calendar_tools' flat shape) or Google's attendee dicts with "responseStatus"."""
+    responses = (event or {}).get("responses")
+    if isinstance(responses, dict):
+        for email, status in responses.items():
+            if str(email).strip().lower() == person:
+                return status
+    return response_status(event, person)
+
+
+def _recurrence_rule(event: Optional[dict]) -> Optional[list]:
+    """A whole series' recurrence rule (not one occurrence's). The flat shape keeps it in raw."""
+    event = event or {}
+    raw = event.get("raw") if isinstance(event.get("raw"), dict) else {}
+    return event.get("recurrence") or raw.get("recurrence") or None
+
+
+def _is_series(event: Optional[dict]) -> bool:
+    return bool(_recurrence_rule(event))
 
 
 def _is_busy(event: dict, person: str, exclude_ids: set[str]) -> bool:
@@ -231,7 +261,7 @@ def _is_busy(event: dict, person: str, exclude_ids: set[str]) -> bool:
         return False
     if person not in attendee_emails(event):
         return False
-    return response_status(event, person) != "declined"
+    return _rsvp(event, person) != "declined"
 
 
 def _conflicts(people: list[str], start: datetime, end: datetime, events: list[dict],
@@ -291,7 +321,17 @@ def _plan_cancel(action: ActionRecord, ctx: _Context) -> RepairPlan:
     duration = o_end - o_start
     everyone = attendee_emails(before)
     required = attendee_emails(before, include_optional=False)
-    notify = [p for p in everyone if p != ctx.owner]
+    # Someone who had declined the meeting isn't affected by it coming back.
+    notify = [p for p in everyone if p != ctx.owner and _rsvp(before, p) != "declined"]
+
+    # A cancelled recurring series can only come back as a series. If this calendar
+    # can't create one, re-creating it would silently make one single meeting: refuse.
+    if _is_series(before) and not getattr(ctx.cal, "supports_recurrence", False):
+        return _noop(action, False,
+                     f"Not repaired: '{title}' is a recurring series, and this calendar can "
+                     f"only re-create single meetings, which would silently turn the series "
+                     f"into one meeting. Restore the series from Google Calendar's trash "
+                     f"instead. Nothing was changed.", original_slot=orig)
 
     # Drift: the event is already back (someone restored it by hand or a fixer ran).
     t = ctx.target
@@ -510,6 +550,8 @@ def _clone(event: dict, start: datetime, end: datetime) -> dict:
     """Copy every piece of the original event (title, description, meeting link,
     attendees, ...) except Google's per-event ids, at the given time."""
     out = {k: copy.deepcopy(v) for k, v in event.items() if k not in VOLATILE_KEYS}
+    if _recurrence_rule(event):              # a series comes back as a series
+        out["recurrence"] = copy.deepcopy(_recurrence_rule(event))
     out["start"] = format_like(event["start"], start)
     out["end"] = format_like(event["end"], end)
     return out
@@ -527,6 +569,8 @@ def _revert_changes(before: dict, after: dict) -> dict:
 def _makeup_event(current: dict, before: dict, people: list[str],
                   slot: tuple[datetime, datetime], cant_make: list[str], group_time: str) -> dict:
     ev = _clone(current, *slot)
+    ev.pop("recurrence", None)                  # a makeup sync is a single meeting
+    ev.pop("raw", None)
     ev["summary"] = f"Makeup sync: {_title(before)}"
     by_email = {attendee_email(a): a for a in (current.get("attendees") or [])}
     uses_dicts = any(isinstance(a, dict) for a in by_email.values())

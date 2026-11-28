@@ -6,9 +6,12 @@ from __future__ import annotations
 
 
 
+from datetime import datetime
+
 import pytest
 
 from fake_data import fake_google as g
+from repair import group_repair as group_repair_module
 from fake_data.sample_data import ARYAN, OWNER, SCENARIOS, TEAM, VISISTA, event
 from fake_data.seed import seed
 from repair import calendar_adapter
@@ -21,12 +24,16 @@ from shared import db
 from shared.models import ActionRecord, Flag, UndoResult
 
 INJECTION = SCENARIOS[5]["flag"]["reason"]
+# The demo stories happen Nov 19-21, 2026. Group repair never plans a slot before
+# "now", so these tests run with the clock frozen just before them.
+DEMO_NOW = datetime(2026, 11, 18, 8, 0)
 
 
 @pytest.fixture(autouse=True)
 def fake_calendar(tmp_path, monkeypatch):
     monkeypatch.setattr(g, "STATE_PATH", tmp_path / "fake_google.json")
     monkeypatch.setenv("CTRLZ_CALENDAR_BACKEND", "fake")
+    monkeypatch.setattr(group_repair_module, "current_time", lambda: DEMO_NOW)
     g.reset([])
 
 
@@ -173,8 +180,10 @@ def test_metadata_preserved_google_format():
         assert p[k] == ev[k], k
     for k in ("id", "etag", "htmlLink", "iCalUID", "status"):
         assert k not in p
-    assert p["start"] == {"dateTime": "2026-11-19T11:30:00", "timeZone": "America/Chicago"}
-    assert p["end"]["dateTime"] == "2026-11-19T12:30:00"
+    # Lab ends 11:30 New York, so the earliest slot is 11:30 New York (= 10:30 Chicago).
+    # The explicit offset keeps that instant exact; the event keeps its own timeZone.
+    assert p["start"] == {"dateTime": "2026-11-19T11:30:00-05:00", "timeZone": "America/Chicago"}
+    assert p["end"]["dateTime"] == "2026-11-19T12:30:00-05:00"
     assert plan.notify == [ARYAN]                   # organizer (owner) not notified
 
 

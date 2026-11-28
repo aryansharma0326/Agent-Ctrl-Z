@@ -6,14 +6,17 @@ Events come in two shapes and we accept both:
   * Google API:     "start": {"dateTime": "2026-11-19T15:00:00-06:00", "timeZone": ...},
                     "attendees": [{"email": "a@x.com", "responseStatus": "accepted"}, ...]
 
-Times are compared as wall-clock times in the event's own zone (tz info is
-dropped after parsing), which is what "working hours" means to a person.
+Times with an offset are converted to New York time (-05:00, the zone the rest of
+the app uses for times written without one) and then compared as wall-clock times,
+so "15:00Z" and "10:00-05:00" are the same moment and a clash between them is caught.
 """
 from __future__ import annotations
 
 import copy
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+
+NEW_YORK = timezone(timedelta(hours=-5))
 
 
 def parse_time(value: Any) -> datetime:
@@ -26,7 +29,18 @@ def parse_time(value: Any) -> datetime:
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
         dt = datetime.fromisoformat(s)
+    if dt.tzinfo:                      # same instant, on the app's New York clock
+        dt = dt.astimezone(NEW_YORK)
     return dt.replace(tzinfo=None)
+
+
+def _has_offset(value: Any) -> bool:
+    if isinstance(value, dict):
+        value = value.get("dateTime") or ""
+    try:
+        return datetime.fromisoformat(str(value).strip().replace("Z", "+00:00")).tzinfo is not None
+    except ValueError:
+        return False
 
 
 def format_like(original: Any, new: datetime) -> Any:
@@ -34,8 +48,11 @@ def format_like(original: Any, new: datetime) -> Any:
     if isinstance(original, dict):
         out = copy.deepcopy(original)
         out.pop("date", None)
-        out["dateTime"] = new.strftime("%Y-%m-%dT%H:%M:%S")
+        out["dateTime"] = (new.replace(tzinfo=NEW_YORK).isoformat() if _has_offset(original)
+                           else new.strftime("%Y-%m-%dT%H:%M:%S"))
         return out
+    if _has_offset(original):          # keep an explicit offset: same instant, no guessing
+        return new.replace(tzinfo=NEW_YORK).isoformat(timespec="seconds")
     return new.strftime("%Y-%m-%dT%H:%M")
 
 
