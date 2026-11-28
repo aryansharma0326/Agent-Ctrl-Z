@@ -117,8 +117,16 @@ def _undo_create(action: ActionRecord) -> UndoResult:
 
 
 def _rsvps(action: ActionRecord) -> dict:
-    """Current RSVPs for group repair (the event now, else the logged copies)."""
-    event = calendar_tools.calendar_get(action.target_id) or action.after or action.before
+    """Current RSVPs for group repair (the event now, else the logged copies).
+
+    A calendar error or timeout here must not fail the whole undo, so it
+    falls back to the copies in the action log.
+    """
+    try:
+        event = calendar_tools.calendar_get(action.target_id)
+    except Exception:
+        event = None
+    event = event or action.after or action.before
     return dict((event or {}).get("responses") or {})
 
 
